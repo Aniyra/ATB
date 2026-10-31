@@ -1,0 +1,41 @@
+# ATB (All Tool Box) 依赖清单
+#
+# 安装：python -m venv .venv && .venv\Scripts\python -m pip install -r requirements.txt
+# 打包：python ATB.spec（PyInstaller，见 README「打包」）
+#
+# 所有解析器都采用「能力探测 + 优雅降级」：
+# 缺少某个包时对应格式会退回到内置的纯标准库实现，不会导致程序无法启动。
+
+# ── 核心：文档 ───────────────────────────────────────────────
+# 说明：pymupdf 2.x 会连带 onnxruntime / pymupdf-layout / pymupdf4llm
+# （体积与打包复杂度大幅上升），这里锁定 1.x 系列。
+pymupdf>=1.24,<2.0       # PDF（文本/图片/表格/元数据）
+python-docx>=1.1         # DOCX
+openpyxl>=3.1            # XLSX / XLSM
+xlrd>=2.0                # 旧版 XLS
+python-pptx>=0.6.23      # PPTX
+odfpy>=1.4               # ODT / ODS / ODP
+olefile>=0.47            # 旧版 DOC/XLS/PPT/MSG 的 OLE 容器探测
+striprtf>=0.0.26         # RTF
+
+# ── 核心：网页 / 结构化文本 ─────────────────────────────────
+beautifulsoup4>=4.12     # HTML / XML / EPUB 正文抽取
+lxml>=5.0                # bs4 的高性能解析后端
+pyyaml>=6.0              # YAML
+chardet>=5.2             # 编码探测（中文 GBK/GB18030 等）
+
+# ── 核心：图片 / 音视频元数据 ───────────────────────────────
+pillow>=10.0             # 图片尺寸、EXIF、格式识别
+pillow-heif>=0.16        # HEIC / HEIF（iPhone 照片）
+mutagen>=1.47            # MP3/FLAC/M4A/OGG/WAV/MP4 标签与时长
+av>=14                   # 视频解封装/抽帧（内置 FFmpeg，无需外部 exe）
+
+# ── 核心：压缩包 ────────────────────────────────────────────
+py7zr>=0.21              # 7z
+rarfile>=4.1             # RAR（解压需要系统 unrar，列目录不需要）
+
+# ── 可选增强（缺失时自动降级，不影响启动）──────────────────
+pyarrow>=16.0            # Parquet / Arrow IPC（体积较大）
+
+# ── 仅开发/打包需要（运行 ATB 本身不需要）──────────────────
+pyinstaller>=6.0         # build.bat / ATB.spec 单文件打包

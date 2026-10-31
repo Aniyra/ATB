@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "atb": {
+      "command": "D:\\ATB\\.venv\\Scripts\\python.exe",
+      "args": ["D:\\ATB\\main.py", "mcp"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}
