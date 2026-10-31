@@ -24,7 +24,8 @@ import traceback
 
 import config
 from atb import dispatch, output, ui
-from atb.errors import AtbError, ERRORS, log_error, lookup
+from atb.errors import (ERRORS, AtbError, all_errors, list_categories, log_error,
+                        lookup, match_category, normalize_code, search_errors)
 from atb.mcp import format_matrix, main as mcp_main
 from atb.models import ReadOptions, human_size
 from atb.scanner import scan_directory
@@ -125,8 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="启动 MCP Server（stdio）")
 
     sp = sub.add_parser("err", help="错误码速查")
-    sp.add_argument("keyword", nargs="?")
-    sp.add_argument("--list", action="store_true")
+    sp.add_argument("keyword", nargs="?", help="编号(01001/1001) / 类别(01/文件访问) / 关键词(pdf)")
+    sp.add_argument("--all", "--list", action="store_true", dest="all",
+                    help="展开全部错误码与完整解决方案")
+    sp.add_argument("--json", action="store_true", help="输出 JSON")
 
     sub.add_parser("menu", help="交互菜单")
     return p
@@ -279,19 +282,137 @@ def cmd_mcp(a) -> int:
 
 
 def cmd_err(a) -> int:
-    if a.list or not a.keyword:
-        rows = [[code, info["title"], info["solution"].replace("{prog}", config.PROG)[:60]]
-                for code, info in ERRORS.items()]
+    key = (a.keyword or "").strip()
+    as_json = bool(getattr(a, "json", False))
+
+    # 1) 展开全部
+    if getattr(a, "all", False):
+        entries = all_errors(config.PROG)
+        if as_json:
+            print(json.dumps(entries, ensure_ascii=False, indent=2))
+            return 0
         print(ui.banner())
-        print(ui.table(["编号", "问题", "解决方案"], rows, max_col=60))
+        print(ui.paint(f"全部错误码 · {len(entries)} 条", ui.C.BOLD, ui.C.CYAN))
+        current = None
+        for e in entries:
+            if e["category_id"] != current:
+                current = e["category_id"]
+                print()
+                print(ui.paint(f"【{current}】{e['category']}", ui.C.BOLD, ui.C.CYAN))
+            _print_err_detail(e, show_category=False)
+        print()
         return 0
-    found = lookup(a.keyword, config.PROG)
-    if not found:
-        ui.error(f"未找到与 {a.keyword!r} 匹配的错误码")
-        return 1
-    print(ui.kv_block({"编号": found["code"], "类别": found["category"],
-                       "问题": found["title"], "解决方案": found["solution"]}))
-    return 0
+
+    # 2) 无参数：分类总览 + 用法
+    if not key:
+        cats = list_categories()
+        if as_json:
+            payload = {
+                "total": len(ERRORS),
+                "categories": {
+                    cid: {"name": info["name"], "count": len(info["codes"]),
+                          "codes": info["codes"],
+                          "errors": [_err_entry(c) for c in info["codes"]]}
+                    for cid, info in cats.items()
+                },
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        _print_err_overview(cats)
+        return 0
+
+    # 3) 精确编号
+    code = normalize_code(key)
+    if code:
+        entry = _err_entry(code)
+        if as_json:
+            print(json.dumps(entry, ensure_ascii=False, indent=2))
+        else:
+            print()
+            print(ui.paint(f"{entry['code']}  {entry['title']}", ui.C.BOLD, ui.C.RED))
+            _print_err_detail(entry, show_code_row=False)
+        return 0
+
+    # 4) 类别（01 / 1 / 文件访问 / PDF）
+    cat = match_category(key)
+    if cat:
+        entries = [_err_entry(c) for c in list_categories()[cat]["codes"]]
+        if as_json:
+            print(json.dumps(entries, ensure_ascii=False, indent=2))
+            return 0
+        print()
+        print(ui.paint(f"[{cat}] {entries[0]['category']}", ui.C.BOLD, ui.C.CYAN)
+              + ui.paint(f"  {len(entries)} 条", ui.C.GREY))
+        _print_err_rows(entries)
+        return 0
+
+    # 5) 关键词搜索
+    hits = search_errors(key, config.PROG)
+    if hits:
+        if as_json:
+            print(json.dumps(hits, ensure_ascii=False, indent=2))
+            return 0
+        print()
+        print(ui.paint(f"搜索 “{key}” 命中 {len(hits)} 条", ui.C.BOLD, ui.C.CYAN))
+        _print_err_rows(hits)
+        return 0
+
+    ui.error(f"未找到与 {key!r} 匹配的错误码")
+    print(ui.paint("  试试：", ui.C.GREY) + f"{config.PROG} err 01  /  {config.PROG} err pdf  /  "
+          f"{config.PROG} err --all")
+    return 1
+
+
+def _err_entry(code: str) -> dict:
+    entry = lookup(code, config.PROG) or {"code": code, "title": "", "category": "",
+                                          "solution": ""}
+    entry["category_id"] = code[5:7]
+    return entry
+
+
+def _print_err_overview(cats: dict) -> None:
+    print(ui.banner())
+    print(ui.paint(f"共 {len(ERRORS)} 条错误码 · {len(cats)} 个类别", ui.C.BOLD, ui.C.WHITE))
+    for cid, info in cats.items():
+        print()
+        print(ui.paint(f"[{cid}]", ui.C.CYAN) + " " + ui.paint(info["name"], ui.C.BOLD)
+              + ui.paint(f"  {len(info['codes'])} 条", ui.C.GREY))
+        names = " · ".join(ERRORS[c]["title"] for c in info["codes"])
+        for line in ui.wrap_text(names, indent="      "):
+            print(ui.paint(line, ui.C.GREY))
+    print()
+    print(ui.paint("用法", ui.C.BOLD))
+    for tip in (
+        f"{config.PROG} err 01001      单条详情（完整解决方案）",
+        f"{config.PROG} err 01         列出该类别全部",
+        f"{config.PROG} err pdf        关键词搜索",
+        f"{config.PROG} err --all      展开全部错误码",
+        f"{config.PROG} err --json     结构化输出",
+    ):
+        print("  " + tip)
+
+
+def _print_err_rows(entries: list) -> None:
+    for e in entries:
+        print(f"  {ui.paint(e['code'], ui.C.WHITE)}  {e['title']}")
+    print()
+    print(ui.paint("查看完整解决方案：", ui.C.GREY)
+          + f"{config.PROG} err {entries[0]['code'][5:]}")
+
+
+def _print_err_detail(e: dict, show_header: bool = False, show_category: bool = True,
+                      show_code_row: bool = True) -> None:
+    if show_header:
+        print()
+        print(ui.paint(f"{e['code']}  {e['title']}", ui.C.BOLD, ui.C.RED))
+    elif show_code_row:
+        print(f"  {ui.paint(e['code'], ui.C.WHITE)}  {ui.paint(e['title'], ui.C.BOLD)}")
+    if show_category:
+        print(ui.paint(f"  类别  {e['category']}", ui.C.GREY))
+    print(ui.paint("  解决方案", ui.C.GREY))
+    for line in ui.wrap_text(e["solution"], indent="    "):
+        print(line)
+    print()
 
 
 # ── 交互菜单 ─────────────────────────────────────────────────
@@ -333,7 +454,7 @@ def _menu_action(action: str) -> None:
         cmd_doctor(argparse.Namespace(json=False))
         return
     if action == "err":
-        cmd_err(argparse.Namespace(keyword=None, list=True))
+        cmd_err(argparse.Namespace(keyword=None, all=True, json=False))
         return
 
     path = input(ui.paint("路径 > ", ui.C.GREEN)).strip().strip('"')

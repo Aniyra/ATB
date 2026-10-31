@@ -12,6 +12,15 @@ echo  ATB 打包（PyInstaller onefile）
 echo  解释器: %PY%
 echo ────────────────────────────────────────────
 
+if not exist "atb.ico" (
+    echo [i] 未找到 atb.ico，正在生成图标...
+    %PY% make_icon.py
+    if errorlevel 1 (
+        echo [x] 图标生成失败，请检查 Pillow 是否安装。
+        exit /b 1
+    )
+)
+
 %PY% -c "import PyInstaller" >nul 2>nul
 if errorlevel 1 (
     echo [x] 未找到 PyInstaller。

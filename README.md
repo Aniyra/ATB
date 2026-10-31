@@ -1,3 +1,5 @@
+<p align="center"><img src="atb_icon_preview.png" width="120" alt="ATB icon"></p>
+
 # ATB — All Tool Box
 
 > 面向 AI Agent 的**全格式文件读取工具箱**：一个命令、一套 schema，把任意文件变成 Agent 能直接消费的文本与结构化数据。
@@ -316,11 +318,15 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 查询：
 
 ```bat
-python main.py err              :: 总览
-python main.py err 1003         :: 精确查询（等价于 ATB-E01003）
-python main.py err 编码         :: 关键词查询
+python main.py err                :: 分类总览 + 用法
+python main.py err 01001          :: 单条详情（完整解决方案，自动换行）
+python main.py err 01             :: 按类别列出（01 / 文件访问 / PDF 都行）
+python main.py err pdf            :: 关键词搜索
+python main.py err --all          :: 展开全部 27 条
+python main.py err --json         :: 结构化输出，便于程序消费
 ```
 
+编号规则：`ATB-E<2 位类别><3 位流水>`，例如 `ATB-E01001`。输入时可以简写为 `1001`、`01001` 或 `E01001`。
 最近 50 条错误会写入 `reports/atb_error_log.json`，便于复盘。
 
 ---
@@ -334,11 +340,12 @@ build.bat
 `build.bat` 会：
 
 1. 优先使用 `.venv\Scripts\python.exe`（不存在则用系统 Python）；
-2. 检查 PyInstaller，缺失时给出安装命令；
-3. 执行 `pyinstaller ATB.spec --noconfirm --clean`；
-4. 报告产物路径与体积。
+2. 缺少 `atb.ico` 时自动运行 `make_icon.py` 生成图标；
+3. 检查 PyInstaller，缺失时给出安装命令；
+4. 执行 `pyinstaller ATB.spec --noconfirm --clean`；
+5. 报告产物路径与体积。
 
-产物：`dist\ATB.exe`（单文件、控制台程序）。参数与源码运行完全一致：
+产物：`dist\ATB.exe`（单文件、控制台程序，带专属图标与 Windows 版本资源）。参数与源码运行完全一致：
 
 ```bat
 dist\ATB.exe read "D:\docs\报告.pdf" --md
@@ -348,10 +355,18 @@ dist\ATB.exe mcp
 设计要点（详见 [ATB.spec](ATB.spec) 头部注释）：
 
 - `onefile` + `console=True`：保留 CLI 与 MCP stdio；
+- `icon` + `version`：写入 `atb.ico` 与产品名/版本/版权等文件属性；
 - 解析库按需收集，`tkinter/matplotlib/pandas/scipy` 显式排除，控制体积；
 - `optimize=0`：保留模块 docstring（`--help` 文本）；
 - `upx=False`：降低杀软误报，构建更稳定；
 - 外部工具（ffprobe/tesseract）不内置，运行时从 `PATH` 查找。
+
+图标由 [make_icon.py](make_icon.py) 用 Pillow 程序化绘制（深色圆角底 + 青蓝渐变工具箱 + ATB 字样），
+输出含 256/128/64/48/32/16 六种尺寸的 `atb.ico`，可随时改配色后重新生成：
+
+```bat
+python make_icon.py
+```
 
 > 若只需核心能力，可先卸载 `pyarrow` 再打包，产物会小很多；Parquet 将自动降级并提示。
 
@@ -387,7 +402,10 @@ ATB/
 ├─ tests/                 单元测试（标准库 unittest，45 用例）
 ├─ reports/               运行期错误日志（自动创建）
 ├─ requirements.txt
-├─ ATB.spec               PyInstaller 配置
+├─ atb.ico                exe 图标（由 make_icon.py 生成）
+├─ atb_icon_preview.png   图标预览（README 展示用）
+├─ make_icon.py           程序化生成多尺寸图标
+├─ ATB.spec               PyInstaller 配置（图标 + 版本资源）
 ├─ build.bat              一键打包
 ├─ atb.bat                便捷启动器（自动使用 .venv）
 └─ mcp.example.json       MCP 配置示例

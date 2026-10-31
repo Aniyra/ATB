@@ -12,7 +12,45 @@
 # 构建：python -m PyInstaller ATB.spec --noconfirm --clean
 # 产物：dist/ATB.exe
 
+import os
+
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from PyInstaller.utils.win32.versioninfo import (
+    VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable,
+    StringStruct, VarFileInfo, VarStruct,
+)
+
+# ── 应用元信息（与 config.py 保持一致）──────────────────────
+APP_NAME = "ATB (All Tool Box)"
+APP_VERSION = "1.0.0.0"
+APP_AUTHOR = "LFTAniyra"
+APP_COPYRIGHT = "Copyright (c) 2026 LFTAniyra"
+ICON_FILE = "atb.ico"
+
+if not os.path.isfile(ICON_FILE):
+    raise SystemExit("缺少 atb.ico，请先运行: python make_icon.py")
+
+_ver = tuple(int(x) for x in APP_VERSION.split("."))
+VERSION_INFO = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=_ver, prodvers=_ver, mask=0x3F, flags=0x0,
+                      OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+    kids=[
+        StringFileInfo([
+            StringTable("080404B0", [
+                StringStruct("CompanyName", APP_AUTHOR),
+                StringStruct("FileDescription", APP_NAME),
+                StringStruct("FileVersion", APP_VERSION),
+                StringStruct("InternalName", "ATB"),
+                StringStruct("LegalCopyright", APP_COPYRIGHT),
+                StringStruct("OriginalFilename", "ATB.exe"),
+                StringStruct("ProductName", APP_NAME),
+                StringStruct("ProductVersion", APP_VERSION),
+                StringStruct("Comments", "面向 AI Agent 的全格式文件读取工具箱"),
+            ]),
+        ]),
+        VarFileInfo([VarStruct("Translation", [2052, 1200])]),
+    ],
+)
 
 # ── 需要完整收集的解析库（装了就收，没装跳过）────────────────
 PACKAGES = [
@@ -97,5 +135,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=[ICON_FILE],
+    version=VERSION_INFO,
 )

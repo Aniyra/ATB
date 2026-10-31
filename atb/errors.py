@@ -227,6 +227,57 @@ def lookup(raw: str, prog: str = "python main.py") -> Optional[dict]:
     return hits[0] if hits else None
 
 
+def search_errors(keyword: str, prog: str = "python main.py") -> list:
+    """按关键词搜索错误码（标题 / 解决方案 / 编号），返回全部命中。"""
+    key = str(keyword).strip().lower()
+    if not key:
+        return []
+    hits = []
+    for code, info in ERRORS.items():
+        if key in code.lower() or key in info["title"].lower() or key in info["solution"].lower():
+            hits.append(_entry(code, prog))
+    return hits
+
+
+def _entry(code: str, prog: str = "python main.py") -> dict:
+    info = ERRORS[code]
+    return {
+        "code": code,
+        "category_id": code[5:7],
+        "category": _CATEGORY_NAMES.get(code[5:7], "未知"),
+        "title": info["title"],
+        "solution": info["solution"].replace("{prog}", prog),
+    }
+
+
+def list_categories() -> dict:
+    """按类别分组：{ '01': {'name': '文件访问', 'codes': [...]}, ... }"""
+    out = {}
+    for code in ERRORS:
+        cat = code[5:7]
+        out.setdefault(cat, {"name": _CATEGORY_NAMES.get(cat, "未知"), "codes": []})
+        out[cat]["codes"].append(code)
+    return dict(sorted(out.items()))
+
+
+def match_category(keyword: str) -> Optional[str]:
+    """把 '01' / '1' / '文件访问' / 'pdf' 匹配到类别编号。"""
+    key = str(keyword).strip().lower()
+    if not key:
+        return None
+    if key.isdigit():
+        key = key.zfill(2)
+        return key if key in list_categories() else None
+    for cat, info in list_categories().items():
+        if key == info["name"].lower() or key in info["name"].lower():
+            return cat
+    return None
+
+
+def all_errors(prog: str = "python main.py") -> list:
+    return [_entry(code, prog) for code in ERRORS]
+
+
 def _log_path() -> str:
     from config import REPORT_DIR
 

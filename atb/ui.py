@@ -110,6 +110,27 @@ def _fit(s: str, target: int) -> str:
     return _pad("".join(buf) + "…", target)
 
 
+def wrap_text(text: str, indent: str = "", limit: int = None) -> list:
+    """按显示宽度换行（中文按 2 列），用于长句、解决方案等。"""
+    limit = limit or max(40, width() - _disp_len(indent) - 2)
+    out = []
+    for para in str(text).split("\n"):
+        if not para:
+            out.append(indent)
+            continue
+        cur, cur_w = "", 0
+        for ch in para:
+            step = 2 if ord(ch) > 0x2E80 else 1
+            if cur_w + step > limit:
+                out.append(indent + cur)
+                cur, cur_w = ch, step
+            else:
+                cur += ch
+                cur_w += step
+        out.append(indent + cur)
+    return out
+
+
 def table(headers, rows, max_col: int = 60) -> str:
     """简易等宽表格（支持中文对齐）。"""
     cells = [[("" if c is None else str(c)) for c in row] for row in rows]
