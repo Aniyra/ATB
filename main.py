@@ -40,6 +40,7 @@ MENU = {
     "7": ("启动 MCP Server（stdio）", "mcp"),
     "8": ("错误码速查", "err"),
     "9": ("视频抽帧（供视觉模型理解）", "video"),
+    "10": ("视频分镜图（实验性）", "storyboard"),
     "0": ("退出", "exit"),
 }
 
@@ -109,6 +110,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_video_opts(sp)
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--out", help="把时间轴摘要写入文件")
+
+    def _add_storyboard_opts(sp):
+        sp.add_argument("--cells", type=int,
+                        help="格数（默认按时长与剪辑密度自动，上限 64）")
+        sp.add_argument("--sheets", type=int, default=1,
+                        help="分几张宫格图（默认 1，上限 8）")
+        sp.add_argument("--budget", type=int, dest="storyboard_budget",
+                        default=1_200_000, help="单张图像素预算（默认 1200000）")
+        sp.add_argument("--start", type=float, help="起始秒")
+        sp.add_argument("--end", type=float, help="结束秒")
+
+    sp = sub.add_parser("storyboard", help="【实验性】视频场景分镜图（一张图看全片）")
+    sp.add_argument("path")
+    _add_storyboard_opts(sp)
+    sp.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("scan", help="扫描目录")
     sp.add_argument("path")
@@ -220,6 +236,30 @@ def cmd_video(a) -> int:
         ui.info(f"画面预算：{budget['frames']} 帧 · 图片 {budget['image_bytes_human']} · "
                 f"base64 {budget['base64_human']} · 约 {budget['tokens_estimate']} tokens")
         ui.info("这些帧已落盘；MCP 模式会把它们作为图片内容直接交给模型")
+    return 0
+
+
+def cmd_storyboard(a) -> int:
+    opts = ReadOptions(
+        storyboard=True,
+        cells=a.cells,
+        sheets=a.sheets,
+        storyboard_budget=a.storyboard_budget,
+        start=a.start,
+        end=a.end,
+    )
+    doc = dispatch.read_file(a.path, opts)
+    if a.json:
+        print(json.dumps(doc.to_dict(), ensure_ascii=False, indent=2, default=str))
+        return 0
+    print(output.render(doc, "text"))
+    sb = doc.metadata.get("storyboard") or {}
+    if sb:
+        print()
+        ui.info(f"【实验性】{sb['cells']} 格 · {sb['cuts']} 个切点 · "
+                f"{len(sb['sheets'])} 张图 · 约 {sb['tokens_estimate']} tokens")
+        for p in sb["sheets"]:
+            print("  " + p)
     return 0
 
 
@@ -474,6 +514,10 @@ def _menu_action(action: str) -> None:
             path=path, frames=12, start=None, end=None, frame_width=768,
             frame_quality=80, include_audio=False, frame_dir=None,
             scene=False, json=False, out=None))
+    elif action == "storyboard":
+        cmd_storyboard(argparse.Namespace(
+            path=path, cells=None, sheets=1, storyboard_budget=1_200_000,
+            start=None, end=None, json=False))
     elif action == "scan":
         result = scan_directory(path)
         print(output.render_scan(result))
@@ -570,8 +614,8 @@ def main(argv=None) -> int:
 
     handlers = {
         "read": cmd_read, "text": cmd_text, "info": cmd_info, "video": cmd_video,
-        "scan": cmd_scan, "formats": cmd_formats, "doctor": cmd_doctor,
-        "mcp": cmd_mcp, "err": cmd_err,
+        "storyboard": cmd_storyboard, "scan": cmd_scan, "formats": cmd_formats,
+        "doctor": cmd_doctor, "mcp": cmd_mcp, "err": cmd_err,
     }
     try:
         return handlers[args.cmd](args)

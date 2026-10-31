@@ -21,6 +21,11 @@ def read_file(path: str, options: Optional[ReadOptions] = None,
     try:
         read_file_guard(path)
         det = detect(path, force_format)
+        if det.format == "video" and opts.storyboard:
+            from .experimental.storyboard import build_storyboard
+            doc = build_storyboard(path, det, opts)
+            doc.mime = det.mime
+            return doc
         reader = READER_BY_FORMAT.get(det.format)
         if reader is None:
             raise AtbError("ATB-E02001", f"{path}（格式 {det.format} 无可用解析器）")

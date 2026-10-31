@@ -54,6 +54,7 @@ ATB 的做法：**统一探测 → 统一解析 → 统一 Document schema → �
 | 图片 | `png` `jpg` `webp` `gif` `tiff` `bmp` `heic` `avif` `psd` `ico` | 尺寸、模式、EXIF、帧数；可选 OCR |
 | 音视频 | `mp3` `flac` `wav` `m4a` `ogg` `opus` · `mp4` `mkv` `avi` `mov` `webm` | 时长、码率、采样率、标签；有 ffprobe 时输出完整流信息 |
 | 视频理解 | `mp4` `mkv` `avi` `mov` `webm` | **逐帧抽帧 + 时间轴 + MCP 图片回传**，让视觉模型真正看到画面；可导出音轨 |
+| 视频分镜（实验性） | `mp4` `mkv` `avi` `mov` `webm` | **一张宫格图看全片**：编号 + 时间码 + 音频包络，按剪辑密度分格，格内取最清晰帧 |
 | 压缩包 | `zip` `7z` `rar` `tar` `gz` `bz2` `xz` `jar` `apk` `whl` `iso` | 条目清单、压缩率、加密检测、`--member` 读取内部文本 |
 | 字幕 | `srt` `vtt` `ass` `ssa` `lrc` | 逐条字幕 + 时间轴 |
 | 邮件 | `eml` `msg` `mbox` | 主题/收发人/正文/附件清单 |
@@ -164,6 +165,39 @@ MCP 模式下 `atb_read_video` 会把帧作为 **image content** 直接回传，
 都明确要求模型：若自身不具备视觉能力，必须直接告诉用户「无法查看画面」，
 不得根据文件名或元数据臆测内容。`atb_video_guide` 可随时查询完整预算指南。
 
+### 实验性：视频分镜（Storyboard）
+
+> ⚠ 实验性功能：参数、阈值与输出结构可能随版本调整，不建议用于稳定流水线。
+
+把整段视频压成**一张可寻址的宫格图**：每格带编号与时间码，格位按剪辑密度分配
+（快切区格子更短、更密），格内从 3 个候选帧里按 Laplacian 方差挑最清晰的一张，
+底部再叠加与画面同时间轴的音频包络。
+
+```bat
+:: 默认 9-16 格自动分格，一张图
+python main.py storyboard "D:\videos\demo.mp4"
+
+:: 指定格数 / 分两张图 / 单张像素预算
+python main.py storyboard "D:\videos\demo.mp4" --cells 12 --sheets 2 --budget 1200000
+
+:: 只看某一段
+python main.py storyboard "D:\videos\demo.mp4" --start 60 --end 180
+```
+
+MCP 工具 `atb_video_storyboard` 会把宫格图作为 image content 直接回传。实测对比
+（1080p 样片）：
+
+| 方案 | 覆盖范围 | 图片 | 预计 tokens |
+| --- | --- | --- | --- |
+| 逐帧 `atb_read_video`（12 帧） | 12 个瞬间 | 12 张 | ≈ 5,300 |
+| 分镜 `atb_video_storyboard`（9 格） | 全片 | 1 张 | ≈ 2,300 |
+
+算法思路参考开源项目 [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard)
+（Apache-2.0），本项目为基于 PyAV + Pillow 的独立 Python 实现，未复制其源码。
+与上游的差异：不依赖 ffmpeg 可执行文件、**不含 ASR/台词转写**、不支持 URL 输入。
+
+推荐工作流：先用分镜图建立全片概览，再用 `atb_read_video --start/--end` 对关键段细看。
+
 不带参数运行进入**交互菜单**：
 
 ```bat
@@ -253,6 +287,7 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 |---|---|
 | `atb_read_file` | 读取任意文件，返回完整 Document（元数据 + 块 + 文本） |
 | `atb_read_video` | 抽帧并回传 **image content**，让视觉模型直接看画面；带时间轴与预算提示 |
+| `atb_video_storyboard` | **实验性**：整段视频 → 一张宫格分镜图（编号/时间码/音频包络），token 更省 |
 | `atb_video_guide` | 视频预算指南：MB 建议、token 公式、不同上下文窗口的帧数上限 |
 | `atb_extract_text` | 只返回纯文本，适合直接进上下文 |
 | `atb_file_info` | 轻量探测：格式/MIME/大小/SHA256 |
@@ -388,18 +423,20 @@ ATB/
 │  ├─ mcp.py              stdio MCP Server（JSON-RPC 2.0）
 │  ├─ ui.py               ANSI 颜色、横幅、等宽表格
 │  ├─ errors.py           错误码体系与错误日志
-│  └─ readers/
-│     ├─ base.py          基类、编码探测、页码解析、Document 构造
-│     ├─ text.py          纯文本 / 源码 / Markdown
-│     ├─ office.py        DOCX / XLSX / XLS / PPTX / ODF / RTF / 旧版 OLE
-│     ├─ pdf.py           PDF（PyMuPDF + 内置降级）
-│     ├─ web.py           HTML / XML / EPUB / FB2 / MOBI
-│     ├─ data.py          JSON / JSONL / YAML / TOML / CSV / SQLite / Parquet / ipynb
-│     ├─ media.py         图片 / 音频 / 字体 / PE
-│     ├─ video.py         视频抽帧 / 时间轴 / 预算估算（PyAV）
-│     ├─ archive.py       ZIP / TAR / 7Z / RAR / GZ / BZ2 / XZ
-│     └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
-├─ tests/                 单元测试（标准库 unittest，45 用例）
+│  ├─ readers/
+│  │  ├─ base.py          基类、编码探测、页码解析、Document 构造
+│  │  ├─ text.py          纯文本 / 源码 / Markdown
+│  │  ├─ office.py        DOCX / XLSX / XLS / PPTX / ODF / RTF / 旧版 OLE
+│  │  ├─ pdf.py           PDF（PyMuPDF + 内置降级）
+│  │  ├─ web.py           HTML / XML / EPUB / FB2 / MOBI
+│  │  ├─ data.py          JSON / JSONL / YAML / TOML / CSV / SQLite / Parquet / ipynb
+│  │  ├─ media.py         图片 / 音频 / 字体 / PE
+│  │  ├─ video.py         视频抽帧 / 时间轴 / 预算估算（PyAV）
+│  │  ├─ archive.py       ZIP / TAR / 7Z / RAR / GZ / BZ2 / XZ
+│  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
+│  └─ experimental/
+│     └─ storyboard.py    【实验性】场景分镜：切点检测 / 分格 / 宫格图（PyAV + Pillow）
+├─ tests/                 单元测试（标准库 unittest，50 用例）
 ├─ reports/               运行期错误日志（自动创建）
 ├─ requirements.txt
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
@@ -422,7 +459,7 @@ python -m unittest discover -s tests -v
 覆盖：格式探测（魔术字节、ZIP 细分、强制格式）、读取链路（文本/Markdown/GBK/CSV/JSON/JSONL/压缩包/成员读取）、
 错误处理（缺失文件、目录、safe 模式）、错误码归一化、目录扫描、MCP 协议（initialize / tools/list / tools/call /
 错误返回 / 未知方法 / Content-Length 分帧）、视频抽帧（现场编码小视频后读取、时间窗、帧差异、关键帧采样、
-MCP image content 回传）。
+MCP image content 回传）、实验性分镜（切点检测、多图分格、时间窗、MCP 宫格图回传）。
 
 ---
 
@@ -432,6 +469,15 @@ MCP image content 回传）。
 - **不解压**：压缩包默认只列目录；读取内部条目时仅在内存中解压，不落盘，避免 Zip Slip。
 - **不联网**：除可选依赖安装外，运行期无任何网络请求。
 - **隐私**：文件内容只在本机处理；MCP 模式下内容由客户端决定是否发送给模型。
+
+---
+
+## 参考与致谢
+
+- 视频分镜的算法思路参考 [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard)
+  （Apache-2.0）：HSV 三通道切点检测、按局部剪辑密度分配格位、Laplacian 方差选帧、音频包络同轴绘制。
+  本项目为基于 PyAV + Pillow 的独立 Python 实现，**未复制其源码**；差异见「实验性：视频分镜」。
+- PDF / Office / 压缩包 / 视频解码等能力来自 PyMuPDF、python-docx、openpyxl、python-pptx、py7zr、PyAV 等开源项目，详见 [requirements.txt](requirements.txt)。
 
 ---
 

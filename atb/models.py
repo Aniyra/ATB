@@ -64,6 +64,12 @@ class ReadOptions:
     frame_dir: Optional[str] = None    # 帧输出目录
     sampling: str = "uniform"          # uniform / keyframe
 
+    # ── 实验性：场景分镜 ──
+    storyboard: bool = False           # 改用分镜图（一张宫格图）
+    cells: Optional[int] = None        # 格数；None = 按时长/剪辑密度自动
+    sheets: int = 1                    # 分几张图
+    storyboard_budget: int = 1_200_000  # 单张图像素预算
+
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "ReadOptions":
         data = data or {}

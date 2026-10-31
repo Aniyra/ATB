@@ -5,10 +5,12 @@
   1. 换行分隔的 JSON（MCP stdio 官方行为）
   2. LSP 风格 `Content-Length: N\\r\\n\\r\\n{json}`
 
-提供工具：atb_read_file / atb_read_video / atb_video_guide / atb_extract_text /
-atb_file_info / atb_scan_directory / atb_search_text / atb_read_batch / atb_list_formats。
+提供工具：atb_read_file / atb_read_video / atb_video_storyboard / atb_video_guide /
+atb_extract_text / atb_file_info / atb_scan_directory / atb_search_text /
+atb_read_batch / atb_list_formats。
 """
 
+import base64
 import json
 import os
 import sys
@@ -71,6 +73,30 @@ TOOLS: List[dict] = [
                 "sampling": {"type": "string", "enum": ["uniform", "keyframe"],
                              "description": "uniform 均匀采样；keyframe 按关键帧（适合剪辑类视频）"},
                 "audio": {"type": "boolean", "description": "是否导出音轨文件（供具备音频能力的模型使用）"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "atb_video_storyboard",
+        "description": (
+            "【实验性】场景分镜：把整段视频压成一张可寻址的宫格图（编号 + 时间码 + 音频包络），"
+            "以 MCP image content 回传。相比逐帧方案更省 token：一张 1.2M 像素的图约 1600 tokens，"
+            "即可覆盖全片；格位按剪辑密度分配，快切区获得更多格。"
+            "\n\n参数：cells 格数（默认按时长/密度自动，上限 64）、sheets 张数（默认 1）、"
+            "budget 单张像素预算（默认 1200000）、start/end 时间窗。"
+            "\n\n⚠ 实验性：算法与输出结构可能变化；本实现不含 ASR/台词转写。"
+            "若模型不具备原生图像输入能力，必须告知用户无法查看画面，不要臆测内容。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "视频文件绝对路径"},
+                "cells": {"type": "integer", "description": "格数，默认自动（4-16），上限 64"},
+                "sheets": {"type": "integer", "description": "输出几张宫格图，默认 1，上限 8"},
+                "budget": {"type": "integer", "description": "单张图像素预算，默认 1200000"},
+                "start": {"type": "number", "description": "起始秒"},
+                "end": {"type": "number", "description": "结束秒"},
             },
             "required": ["path"],
         },
@@ -229,6 +255,8 @@ class McpServer:
                             "原生图像输入能力——若你不支持图像内容，必须告知用户，不要臆测画面。"
                             "图片 token 建议不超过上下文窗口的 25%，长视频用 start/end 分段读取；"
                             "参数不确定时先调用 atb_video_guide 查看预算指南。"
+                            "\n\n【实验性】atb_video_storyboard 可把整段视频压成一张分镜宫格图，"
+                            "token 成本远低于逐帧；适合先建立全片概览，再对关键段用 atb_read_video 细看。"
                         ),
                     })
                 elif method == "ping":
@@ -290,6 +318,8 @@ class McpServer:
             return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         if name == "atb_read_video":
             return _video_payload(args)
+        if name == "atb_video_storyboard":
+            return _storyboard_payload(args)
         if name == "atb_video_guide":
             return VIDEO_GUIDE
         if name == "atb_extract_text":
@@ -416,6 +446,57 @@ def _video_payload(args: dict):
 
     content = [{"type": "text", "text": "\n".join(lines)}]
     content.extend(frames_as_mcp_images(frames))
+    return content
+
+
+def _storyboard_payload(args: dict):
+    """【实验性】返回 MCP content：分镜摘要 + 宫格图。"""
+    opts = ReadOptions(
+        storyboard=True,
+        cells=args.get("cells"),
+        sheets=int(args.get("sheets") or 1),
+        storyboard_budget=int(args.get("budget") or 1_200_000),
+        start=args.get("start"),
+        end=args.get("end"),
+    )
+    doc = dispatch.read_file(args["path"], opts)
+    if doc.format != "video":
+        return (f"该文件被识别为 `{doc.format}`，不是视频。请改用 atb_read_file。")
+
+    sb = doc.metadata.get("storyboard") or {}
+    lines = ["# 视频分镜（实验性）", ""]
+    lines.append(f"- 时长：{doc.metadata.get('duration')}s；分辨率："
+                 f"{doc.metadata.get('width')}×{doc.metadata.get('height')}；"
+                 f"格数：{sb.get('cells')}；切点：{sb.get('cuts')}；图：{len(sb.get('sheets', []))} 张")
+    lines.append(f"- 单格尺寸：{sb.get('cell_size', ['-', '-'])[0]}×"
+                 f"{sb.get('cell_size', ['-', '-'])[1]}；"
+                 f"图片 token 估算：约 {sb.get('tokens_estimate')}")
+    lines.append("")
+    lines.append("## 格子时间轴")
+    for c in (sb.get("cell_table") or [])[:64]:
+        lines.append(f"- 格 {c['index']}：{fmt_time(c['start'])}–{fmt_time(c['end'])}")
+    if doc.warnings:
+        lines.append("")
+        lines.append("## 提示")
+        lines.extend(f"- {w}" for w in doc.warnings)
+    lines.append("")
+    lines.append("## 使用要求")
+    lines.append("1. 具备原生图像输入：先看宫格图建立全片概览，再按编号/时间码追问。")
+    lines.append("2. 需要细节时，用 atb_read_video 的 start/end 对关键段加密取帧。")
+    lines.append("3. 不具备图像输入：直接告诉用户无法查看画面，不要臆测内容。")
+
+    content = [{"type": "text", "text": "\n".join(lines)}]
+    for fp in sb.get("sheets", []):
+        try:
+            with open(fp, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        content.append({
+            "type": "image",
+            "data": base64.b64encode(data).decode("ascii"),
+            "mimeType": "image/jpeg",
+        })
     return content
 
 
