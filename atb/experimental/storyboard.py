@@ -19,6 +19,7 @@ import array
 import hashlib
 import math
 import os
+import time
 from typing import List, Optional, Tuple
 
 import config
@@ -64,7 +65,9 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
                           "audio_codec", "bit_rate")})
     doc.metadata["window"] = {"start": round(start, 2), "end": round(end, 2)}
 
+    t_cuts = time.perf_counter()
     cuts = _detect_cuts(path, start, end, doc)
+    cuts_s = round(time.perf_counter() - t_cuts, 2)
     cells = _plan_cells(cuts, start, end, opts.cells)
     requested = max(1, min(int(opts.sheets or 1), 8))
     per_sheet = int(math.ceil(len(cells) / requested))
@@ -74,9 +77,15 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
     budget = max(160_000, min(int(opts.storyboard_budget or DEFAULT_BUDGET), 8_000_000))
     cell_w, cell_h = _cell_size(aspect, budget, per_sheet)
 
+    t_grab = time.perf_counter()
     frames = _grab_cell_frames(path, cells, cell_w, cell_h, doc)
-    envelope = _audio_envelope(path, start, end, buckets=900)
+    grab_s = round(time.perf_counter() - t_grab, 2)
 
+    t_audio = time.perf_counter()
+    envelope = _audio_envelope(path, start, end, buckets=900)
+    audio_s = round(time.perf_counter() - t_audio, 2)
+
+    t_render = time.perf_counter()
     out_dir = _output_dir(path)
     sheet_paths = []
     for si in range(sheets_n):
@@ -90,21 +99,30 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
         fp = _render_sheet(part, part_frames, si + 1, sheets_n, begin,
                            cell_w, cell_h, start, end, envelope, out_dir)
         sheet_paths.append(fp)
+    render_s = round(time.perf_counter() - t_render, 2)
 
     _fill_document(doc, info, cells, frames, cuts, sheet_paths, cell_w, cell_h,
-                   start, end, envelope, budget)
+                   start, end, envelope, budget,
+                   timings={"cuts": cuts_s, "grab": grab_s, "audio": audio_s,
+                            "render": render_s})
+
+    total = round(sum(v for k, v in doc.metadata["storyboard"]["timings"].items()
+                      if k != "total"), 2)
+    doc.metadata["storyboard"]["timings"]["total"] = total
     return doc
 
 
 # ── 切点检测 ─────────────────────────────────────────────────
 def _detect_cuts(path: str, start: float, end: float, doc: Document) -> List[float]:
-    """HSV 三通道差分找场景切换点（约 10 次/秒采样）。"""
+    """HSV 三通道差分找场景切换点（C 层 ImageChops，约 6-7 次/秒采样）。"""
     import av
+    from PIL import ImageChops, ImageStat
 
     samples: List[Tuple[float, float]] = []
     prev = None
     prev_t = None
-    min_dt = 0.1
+    span = max(end - start, 0.1)
+    min_dt = 0.15 if span <= 600 else 0.25
     try:
         with av.open(path) as c:
             stream = c.streams.video[0]
@@ -120,13 +138,13 @@ def _detect_cuts(path: str, start: float, end: float, doc: Document) -> List[flo
                 if prev_t is not None and t - prev_t < min_dt:
                     continue
                 try:
-                    small = frame.reformat(width=64, height=36)  # libswscale 缩放，比 PIL 全图转换快
-                    img = small.to_image().convert("RGB")
+                    img = frame.reformat(width=64, height=36, format="rgb24").to_image()
                 except Exception:
                     img = frame.to_image().convert("RGB").resize((64, 36))
-                hsv = img.convert("HSV").tobytes()
+                hsv = img.convert("HSV")
                 if prev is not None:
-                    samples.append((t, _hsv_diff(prev, hsv)))
+                    stat = ImageStat.Stat(ImageChops.difference(prev, hsv))
+                    samples.append((t, sum(stat.mean)))   # |ΔH|+|ΔS|+|ΔV| 的均值之和
                 prev, prev_t = hsv, t
     except Exception as e:
         doc.warnings.append(f"切点检测失败，退化为均匀分格：{type(e).__name__}: {e}")
@@ -135,7 +153,6 @@ def _detect_cuts(path: str, start: float, end: float, doc: Document) -> List[flo
     if not samples:
         return []
 
-    span = max(end - start, 0.1)
     desired = max(1, min(200, int(span / 1.5)))
     scores = sorted((s for _, s in samples), reverse=True)
     threshold = max(12.0, scores[min(len(scores) - 1, desired - 1)] * 0.85)
@@ -151,19 +168,6 @@ def _detect_cuts(path: str, start: float, end: float, doc: Document) -> List[flo
             cuts.append(round(t, 3))
             last = t
     return cuts
-
-
-def _hsv_diff(a: bytes, b: bytes) -> float:
-    total = 0
-    n = min(len(a), len(b)) // 3
-    for i in range(n):
-        j = i * 3
-        dh = abs(a[j] - b[j])
-        dh = min(dh, 255 - dh)          # 色相是环形量
-        ds = abs(a[j + 1] - b[j + 1])
-        dv = abs(a[j + 2] - b[j + 2])
-        total += dh + ds + dv
-    return total / max(n, 1)
 
 
 def _frame_time(frame, stream) -> Optional[float]:
@@ -243,8 +247,12 @@ def _grab_cell_frames(path: str, cells, cell_w: int, cell_h: int,
                     target, idx = pending.pop(0)
                     if t - target > 1.5:
                         continue
-                    img = frame.to_image().convert("RGB")
-                    img.thumbnail((cell_w, cell_h), Image.LANCZOS)
+                    try:
+                        img = frame.reformat(width=cell_w, height=cell_h,
+                                             format="rgb24").to_image()
+                    except Exception:
+                        img = frame.to_image().convert("RGB")
+                        img.thumbnail((cell_w, cell_h), Image.LANCZOS)
                     gray = img.convert("L")
                     lap = gray.filter(ImageFilter.Kernel(
                         (3, 3), [0, 1, 0, 1, -4, 1, 0, 1, 0], scale=1))
@@ -443,7 +451,7 @@ def _output_dir(path: str) -> str:
 
 def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
                    cell_w: int, cell_h: int, start: float, end: float, envelope,
-                   budget: int):
+                   budget: int, timings: Optional[dict] = None):
     from PIL import Image
 
     doc.blocks.append(Block("heading", "视频分镜（实验性）", level=1))
@@ -486,6 +494,7 @@ def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
             for i, (a, b) in enumerate(cells, 1)
         ],
         "upstream": "https://github.com/SAOS-3624/dsh-video-storyboard",
+        "timings": timings or {},
     }
     doc.warnings.append("⚠ 实验性功能：分镜参数与输出结构可能变化")
     doc.warnings.append("本实现不含 ASR/台词转写；音频仅以包络形式呈现")

@@ -255,9 +255,12 @@ def cmd_storyboard(a) -> int:
     print(output.render(doc, "text"))
     sb = doc.metadata.get("storyboard") or {}
     if sb:
+        t = sb.get("timings") or {}
         print()
         ui.info(f"【实验性】{sb['cells']} 格 · {sb['cuts']} 个切点 · "
-                f"{len(sb['sheets'])} 张图 · 约 {sb['tokens_estimate']} tokens")
+                f"{len(sb['sheets'])} 张图 · 约 {sb['tokens_estimate']} tokens · "
+                f"耗时 {t.get('total', '?')}s（切点 {t.get('cuts', '?')}s / "
+                f"取帧 {t.get('grab', '?')}s）")
         for p in sb["sheets"]:
             print("  " + p)
     return 0

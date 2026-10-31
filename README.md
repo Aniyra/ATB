@@ -192,6 +192,17 @@ MCP 工具 `atb_video_storyboard` 会把宫格图作为 image content 直接回�
 | 逐帧 `atb_read_video`（12 帧） | 12 个瞬间 | 12 张 | ≈ 5,300 |
 | 分镜 `atb_video_storyboard`（9 格） | 全片 | 1 张 | ≈ 2,300 |
 
+处理耗时（1080p，同机实测）：
+
+| 视频 | 总耗时 | 切点检测 / 取帧 | 分格 |
+| --- | --- | --- | --- |
+| SixDigits（60s） | 2.6s | 1.1s / 1.0s | 7 格 |
+| OneTimeIdentity（138s） | 4.9s | 2.4s / 2.1s | 11 格 |
+| InterfaceWar（332s） | 11.4s | 5.7s / 5.1s | 12 格 |
+
+切点检测在 C 层（Pillow `ImageChops`）完成、约 6–7 次/秒采样；取帧时直接按格尺寸解码，避免全图转换。
+`storyboard.timings` 字段会返回各阶段耗时，便于定位慢在哪一步。
+
 算法思路参考开源项目 [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard)
 （Apache-2.0），本项目为基于 PyAV + Pillow 的独立 Python 实现，未复制其源码。
 与上游的差异：不依赖 ffmpeg 可执行文件、**不含 ASR/台词转写**、不支持 URL 输入。
@@ -206,7 +217,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ATB (All Tool Box)  v1.1.0                                               │
+│ ATB (All Tool Box)  v1.1.1                                               │
 │ 面向 AI Agent 的全格式文件读取工具箱                                      │
 └──────────────────────────────────────────────────────────────────────────┘
 

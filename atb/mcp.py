@@ -471,6 +471,10 @@ def _storyboard_payload(args: dict):
     lines.append(f"- 单格尺寸：{sb.get('cell_size', ['-', '-'])[0]}×"
                  f"{sb.get('cell_size', ['-', '-'])[1]}；"
                  f"图片 token 估算：约 {sb.get('tokens_estimate')}")
+    timings = sb.get("timings") or {}
+    if timings:
+        lines.append(f"- 耗时：{timings.get('total')}s"
+                     f"（切点 {timings.get('cuts')}s / 取帧 {timings.get('grab')}s）")
     lines.append("")
     lines.append("## 格子时间轴")
     for c in (sb.get("cell_table") or [])[:64]:
