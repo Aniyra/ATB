@@ -20,6 +20,7 @@ import os
 import platform
 import shutil
 import sys
+import time
 import traceback
 
 import config
@@ -28,7 +29,11 @@ from atb.errors import (ERRORS, AtbError, all_errors, list_categories, log_error
                         lookup, match_category, normalize_code, search_errors)
 from atb.mcp import format_matrix, main as mcp_main
 from atb.models import ReadOptions, human_size
+from atb.progress import NULL as NULL_PROGRESS
+from atb.progress import make_progress
 from atb.scanner import scan_directory
+
+_PROGRESS = NULL_PROGRESS
 
 MENU = {
     "1": ("读取文件（自动识别格式）", "read"),
@@ -56,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--version", action="version",
                    version=f"{config.APP_NAME} {config.APP_VERSION}")
     p.add_argument("--no-color", action="store_true", help="关闭 ANSI 颜色")
+    p.add_argument("--no-progress", action="store_true", help="关闭进度条")
+    p.add_argument("--threads", type=int, default=0, metavar="N",
+                   help="工作线程数，0=自动（最多 4）")
     sub = p.add_subparsers(dest="cmd")
 
     def _add_video_opts(sp):
@@ -71,6 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--frame-dir", dest="frame_dir", help="帧输出目录")
         sp.add_argument("--scene", action="store_true",
                         help="按关键帧采样（适合剪辑类视频）")
+        _add_runtime_opts(sp)
+
+    def _add_runtime_opts(sp):
+        sp.add_argument("--no-progress", action="store_true", default=argparse.SUPPRESS,
+                        help="关闭进度条")
+        sp.add_argument("--threads", type=int, default=argparse.SUPPRESS,
+                        metavar="N", help="工作线程数，0=自动（最多 4）")
 
     def add_read_opts(sp):
         sp.add_argument("--format", help="强制指定格式（pdf/docx/text/...）")
@@ -120,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
                         default=1_200_000, help="单张图像素预算（默认 1200000）")
         sp.add_argument("--start", type=float, help="起始秒")
         sp.add_argument("--end", type=float, help="结束秒")
+        _add_runtime_opts(sp)
 
     sp = sub.add_parser("storyboard", help="【实验性】视频场景分镜图（一张图看全片）")
     sp.add_argument("path")
@@ -169,16 +185,21 @@ def opts_from_args(a) -> ReadOptions:
         include_audio=bool(getattr(a, "include_audio", False)),
         frame_dir=getattr(a, "frame_dir", None),
         sampling="keyframe" if getattr(a, "scene", False) else "uniform",
+        progress=_PROGRESS,
+        threads=getattr(a, "threads", 0),
     )
 
 
 # ── 子命令实现 ───────────────────────────────────────────────
 def cmd_read(a) -> int:
+    t0 = time.perf_counter()
     opts = opts_from_args(a)
     doc = dispatch.read_file(a.path, opts, a.format)
     mode = "json" if a.json else "md" if a.md else "text"
     text = output.render(doc, mode, opts.max_chars)
     _emit(text, a.out)
+    if not a.json:
+        ui.note(f"完成 · {time.perf_counter() - t0:.2f}s · {doc.format}")
     return 0
 
 
@@ -211,6 +232,7 @@ def cmd_info(a) -> int:
 
 
 def cmd_video(a) -> int:
+    t0 = time.perf_counter()
     opts = ReadOptions(
         frames=a.frames or 12,
         start=a.start,
@@ -220,6 +242,8 @@ def cmd_video(a) -> int:
         include_audio=a.include_audio,
         frame_dir=a.frame_dir,
         sampling="keyframe" if a.scene else "uniform",
+        progress=_PROGRESS,
+        threads=getattr(a, "threads", 0),
     )
     doc = dispatch.read_file(a.path, opts)
     if a.json:
@@ -236,10 +260,12 @@ def cmd_video(a) -> int:
         ui.info(f"画面预算：{budget['frames']} 帧 · 图片 {budget['image_bytes_human']} · "
                 f"base64 {budget['base64_human']} · 约 {budget['tokens_estimate']} tokens")
         ui.info("这些帧已落盘；MCP 模式会把它们作为图片内容直接交给模型")
+    ui.note(f"完成 · {time.perf_counter() - t0:.2f}s")
     return 0
 
 
 def cmd_storyboard(a) -> int:
+    t0 = time.perf_counter()
     opts = ReadOptions(
         storyboard=True,
         cells=a.cells,
@@ -247,6 +273,8 @@ def cmd_storyboard(a) -> int:
         storyboard_budget=a.storyboard_budget,
         start=a.start,
         end=a.end,
+        progress=_PROGRESS,
+        threads=getattr(a, "threads", 0),
     )
     doc = dispatch.read_file(a.path, opts)
     if a.json:
@@ -263,6 +291,7 @@ def cmd_storyboard(a) -> int:
                 f"取帧 {t.get('grab', '?')}s）")
         for p in sb["sheets"]:
             print("  " + p)
+    ui.note(f"完成 · {time.perf_counter() - t0:.2f}s · 线程 {sb.get('workers', 1)}")
     return 0
 
 
@@ -516,11 +545,11 @@ def _menu_action(action: str) -> None:
         cmd_video(argparse.Namespace(
             path=path, frames=12, start=None, end=None, frame_width=768,
             frame_quality=80, include_audio=False, frame_dir=None,
-            scene=False, json=False, out=None))
+            scene=False, json=False, out=None, threads=0))
     elif action == "storyboard":
         cmd_storyboard(argparse.Namespace(
             path=path, cells=None, sheets=1, storyboard_budget=1_200_000,
-            start=None, end=None, json=False))
+            start=None, end=None, json=False, threads=0))
     elif action == "scan":
         result = scan_directory(path)
         print(output.render_scan(result))
@@ -606,11 +635,13 @@ def _print_error(err: AtbError) -> None:
 
 
 def main(argv=None) -> int:
+    global _PROGRESS
     ui.init()
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "no_color", False):
         ui._COLOR["on"] = False
+    _PROGRESS = make_progress(False if getattr(args, "no_progress", False) else None)
 
     if not args.cmd or args.cmd == "menu":
         return interactive()
@@ -623,13 +654,16 @@ def main(argv=None) -> int:
     try:
         return handlers[args.cmd](args)
     except AtbError as e:
+        _PROGRESS.close()
         _print_error(e)
         return 2
     except KeyboardInterrupt:
+        _PROGRESS.close()
         print()
         ui.warn("已中断")
         return 130
     except Exception as e:
+        _PROGRESS.close()
         err = AtbError("ATB-E00001", f"{type(e).__name__}: {e}")
         _print_error(err)
         if os.environ.get("ATB_DEBUG"):

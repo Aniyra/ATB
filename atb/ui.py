@@ -192,3 +192,8 @@ def warn(msg: str) -> None:
 
 def error(msg: str) -> None:
     print(paint("[×] ", C.RED) + msg, file=sys.stderr)
+
+
+def note(msg: str) -> None:
+    """状态提示：写 stderr，不影响 --json 的 stdout。"""
+    print(paint(msg, C.GREY), file=sys.stderr)

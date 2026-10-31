@@ -127,6 +127,20 @@ python main.py read "D:\logs\weird.txt" --format pdf
 python main.py mcp
 ```
 
+### CLI 体验
+
+- 长任务（视频抽帧、分镜）显示单行进度条与 ETA，输出到 stderr，不污染 `--json` 的 stdout：
+
+  ```
+  扫描切点 ⠋ 2.4s
+  抽取画面 [████████░░░░░░░░] 50%  24/48  ETA 2.1s  5/16 格
+  生成宫格 [████████████████] 100%  4/4  ETA 0.0s  sheet 4/4
+  ```
+
+- `--no-progress` 关闭进度；非 TTY 环境（管道、CI）自动关闭
+- `--threads N` 指定工作线程：`0`=自动（最多 4）、`1`=单线程；放在子命令前后都可以
+- 完成时输出耗时摘要：`完成 · 1.82s · 线程 4`
+
 ### 视频理解（让 Agent 真正看懂画面）
 
 ```bat
@@ -196,12 +210,13 @@ MCP 工具 `atb_video_storyboard` 会把宫格图作为 image content 直接回�
 
 | 视频 | 总耗时 | 切点检测 / 取帧 | 分格 |
 | --- | --- | --- | --- |
-| SixDigits（60s） | 2.6s | 1.1s / 1.0s | 7 格 |
-| OneTimeIdentity（138s） | 4.9s | 2.4s / 2.1s | 11 格 |
-| InterfaceWar（332s） | 11.4s | 5.7s / 5.1s | 12 格 |
+| SixDigits（60s） | 1.8s | 0.6s / 0.9s | 7 格 |
+| OneTimeIdentity（138s） | 3.7s | 1.3s / 2.0s | 11 格 |
+| InterfaceWar（332s） | 8.0s | 2.8s / 4.8s | 12 格 |
 
-切点检测在 C 层（Pillow `ImageChops`）完成、约 6–7 次/秒采样；取帧时直接按格尺寸解码，避免全图转换。
-`storyboard.timings` 字段会返回各阶段耗时，便于定位慢在哪一步。
+切点扫描只解码参考帧（`skip_frame=NONREF`），比全帧解码快约一倍，切点数量实测不变；
+候选帧缩放/锐度计算走线程池，音频包络与切点扫描并行，多图渲染并行。
+`storyboard.timings` 会返回各阶段耗时（cuts / grab / audio / render / total）与线程数。
 
 算法思路参考开源项目 [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard)
 （Apache-2.0），本项目为基于 PyAV + Pillow 的独立 Python 实现，未复制其源码。
@@ -217,7 +232,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ATB (All Tool Box)  v1.1.1                                               │
+│ ATB (All Tool Box)  v1.2.0                                               │
 │ 面向 AI Agent 的全格式文件读取工具箱                                      │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -435,6 +450,7 @@ ATB/
 │  ├─ scanner.py          目录扫描与格式统计
 │  ├─ mcp.py              stdio MCP Server（JSON-RPC 2.0）
 │  ├─ ui.py               ANSI 颜色、横幅、等宽表格
+│  ├─ progress.py         进度条 / spinner / ETA（stderr，TTY 自动启用）
 │  ├─ errors.py           错误码体系与错误日志
 │  ├─ readers/
 │  │  ├─ base.py          基类、编码探测、页码解析、Document 构造
@@ -449,7 +465,7 @@ ATB/
 │  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
 │  └─ experimental/
 │     └─ storyboard.py    【实验性】场景分镜：切点检测 / 分格 / 宫格图（PyAV + Pillow）
-├─ tests/                 单元测试（标准库 unittest，50 用例）
+├─ tests/                 单元测试（标准库 unittest，56 用例）
 ├─ reports/               运行期错误日志（自动创建）
 ├─ requirements.txt
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
@@ -472,7 +488,8 @@ python -m unittest discover -s tests -v
 覆盖：格式探测（魔术字节、ZIP 细分、强制格式）、读取链路（文本/Markdown/GBK/CSV/JSON/JSONL/压缩包/成员读取）、
 错误处理（缺失文件、目录、safe 模式）、错误码归一化、目录扫描、MCP 协议（initialize / tools/list / tools/call /
 错误返回 / 未知方法 / Content-Length 分帧）、视频抽帧（现场编码小视频后读取、时间窗、帧差异、关键帧采样、
-MCP image content 回传）、实验性分镜（切点检测、多图分格、时间窗、MCP 宫格图回传）。
+MCP image content 回传）、实验性分镜（切点检测、多图分格、时间窗、音频包络与导出、MCP 宫格图回传）、
+进度组件（进度/ETA、spinner、禁用态）。
 
 ---
 

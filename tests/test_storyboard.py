@@ -122,5 +122,62 @@ class StoryboardTest(unittest.TestCase):
         self.assertEqual(base64.b64decode(images[0]["data"])[:3], b"\xff\xd8\xff")
 
 
+def make_av_video(path: str, seconds: int = 2, size=(160, 96), fps: int = 10) -> None:
+    """生成带 PCM 音轨的 MKV，用于验证音频包络与音轨导出。"""
+    import math
+
+    import av
+    from PIL import Image
+
+    c = av.open(path, mode="w")
+    vs = c.add_stream("mpeg4", rate=fps)
+    vs.width, vs.height = size
+    vs.pix_fmt = "yuv420p"
+    aus = c.add_stream("pcm_s16le", rate=44100)
+    aus.layout = "mono"
+
+    for sec in range(seconds):
+        n = 4410
+        frame = av.AudioFrame(format="s16", layout="mono", samples=n)
+        frame.sample_rate = 44100
+        data = bytearray()
+        for i in range(n):
+            val = int(6000 * math.sin(2 * math.pi * 440 * i / 44100))
+            data += int(val).to_bytes(2, "little", signed=True)
+        frame.planes[0].update(bytes(data))
+        frame.pts = sec * n
+        for pkt in aus.encode(frame):
+            c.mux(pkt)
+
+    for i in range(seconds * fps):
+        img = Image.new("RGB", size, ((i * 9) % 256, 60, 180))
+        for pkt in vs.encode(av.VideoFrame.from_image(img)):
+            c.mux(pkt)
+    for pkt in aus.encode():
+        c.mux(pkt)
+    for pkt in vs.encode():
+        c.mux(pkt)
+    c.close()
+
+
+@unittest.skipUnless(has("av") and has("PIL"), "需要 PyAV 与 Pillow")
+class StoryboardAudioTest(unittest.TestCase):
+    def test_audio_envelope_and_export(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "av.mkv")
+            make_av_video(path)
+
+            doc = read_file(path, ReadOptions(storyboard=True, cells=2))
+            sb = doc.metadata["storyboard"]
+            self.assertTrue(sb["has_audio"])
+
+            doc2 = read_file(path, ReadOptions(frames=2, include_audio=True,
+                                               frame_width=128))
+            audio = doc2.metadata.get("audio_path")
+            self.assertTrue(audio, "音轨应成功导出")
+            self.assertTrue(os.path.exists(audio))
+            self.assertGreater(os.path.getsize(audio), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

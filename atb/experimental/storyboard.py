@@ -54,57 +54,128 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
 
     start = max(0.0, float(opts.start or 0.0))
     end = float(opts.end) if opts.end is not None else duration
-    end = min(end, duration)
+    if end > duration:
+        end = duration
+        if opts.end is not None:
+            doc_end_note = f"--end 超出视频时长，已截断到 {duration:.1f}s"
+        else:
+            doc_end_note = ""
+    else:
+        doc_end_note = ""
     if end - start < 0.5:
         raise AtbError("ATB-E00003", f"时间窗过短：{start}s – {end}s")
 
     doc = new_document(path, det, "video.storyboard(experimental)")
     doc.metadata["experimental"] = True
+    if doc_end_note:
+        doc.warnings.append(doc_end_note)
     doc.metadata.update({k: info.get(k) for k in
                          ("duration", "width", "height", "fps", "video_codec",
                           "audio_codec", "bit_rate")})
     doc.metadata["window"] = {"start": round(start, 2), "end": round(end, 2)}
 
+    prog = getattr(opts, "progress", None)
+    workers = _workers(getattr(opts, "threads", 0))
+    total_frames = info.get("frames_total")
+    window_frames = (int(total_frames * (end - start) / duration)
+                     if total_frames and duration else None)
+
+    # 音频包络与切点扫描并行（无音轨时直接跳过）
+    audio_pool = None
+    audio_future = None
+    if info.get("audio_codec"):
+        from concurrent.futures import ThreadPoolExecutor
+        audio_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atb-audio")
+
+        def _timed_audio():
+            t = time.perf_counter()
+            env = _audio_envelope(path, start, end, 900)
+            return env, time.perf_counter() - t
+
+        audio_future = audio_pool.submit(_timed_audio)
+
     t_cuts = time.perf_counter()
-    cuts = _detect_cuts(path, start, end, doc)
+    cuts = _detect_cuts(path, start, end, doc, progress=prog,
+                        total_frames=window_frames)
     cuts_s = round(time.perf_counter() - t_cuts, 2)
     cells = _plan_cells(cuts, start, end, opts.cells)
     requested = max(1, min(int(opts.sheets or 1), 8))
     per_sheet = int(math.ceil(len(cells) / requested))
     sheets_n = int(math.ceil(len(cells) / per_sheet))
+    if len(cells) < requested:
+        doc.warnings.append(f"请求 {requested} 张图，但只有 {len(cells)} 格，"
+                            f"已输出 {sheets_n} 张")
 
     aspect = (info.get("width") or 16) / max(info.get("height") or 9, 1)
     budget = max(160_000, min(int(opts.storyboard_budget or DEFAULT_BUDGET), 8_000_000))
     cell_w, cell_h = _cell_size(aspect, budget, per_sheet)
 
     t_grab = time.perf_counter()
-    frames = _grab_cell_frames(path, cells, cell_w, cell_h, doc)
+    frames = _grab_cell_frames(path, cells, cell_w, cell_h, doc,
+                               progress=prog, workers=workers)
     grab_s = round(time.perf_counter() - t_grab, 2)
 
     t_audio = time.perf_counter()
-    envelope = _audio_envelope(path, start, end, buckets=900)
-    audio_s = round(time.perf_counter() - t_audio, 2)
+    if audio_future is not None:
+        try:
+            envelope, audio_s = audio_future.result()
+        except Exception as e:
+            envelope, audio_s = None, 0.0
+            doc.warnings.append(f"音频包络失败：{type(e).__name__}: {e}")
+        audio_pool.shutdown(wait=False)
+    else:
+        envelope = None
+        audio_s = 0.0
+    if audio_s == 0.0 and audio_future is not None:
+        audio_s = round(time.perf_counter() - t_audio, 2)
 
-    t_render = time.perf_counter()
     out_dir = _output_dir(path)
-    sheet_paths = []
-    for si in range(sheets_n):
+
+    def render_one(si: int):
         begin = si * per_sheet
         part = cells[begin:begin + per_sheet]
         if not part:
-            break
+            return None
         part_frames = {i - begin: frames[i]
                        for i in range(begin, min(begin + per_sheet, len(cells)))
                        if i in frames}
-        fp = _render_sheet(part, part_frames, si + 1, sheets_n, begin,
-                           cell_w, cell_h, start, end, envelope, out_dir)
-        sheet_paths.append(fp)
+        return _render_sheet(part, part_frames, si + 1, sheets_n, begin,
+                             cell_w, cell_h, start, end, envelope, out_dir)
+
+    t_render = time.perf_counter()
+    if prog is not None:
+        prog.stage("生成宫格", total=sheets_n)
+    sheet_paths = []
+    try:
+        if workers > 1 and sheets_n > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            results = {}
+            with ThreadPoolExecutor(max_workers=min(workers, sheets_n),
+                                    thread_name_prefix="atb-sheet") as pool:
+                futures = {pool.submit(render_one, si): si for si in range(sheets_n)}
+                for fut in as_completed(futures):
+                    si = futures[fut]
+                    results[si] = fut.result()
+                    if prog is not None:
+                        prog.update(note=f"sheet {si + 1}/{sheets_n}")
+            sheet_paths = [results[i] for i in range(sheets_n) if results.get(i)]
+        else:
+            for si in range(sheets_n):
+                fp = render_one(si)
+                if fp:
+                    sheet_paths.append(fp)
+                if prog is not None:
+                    prog.update(note=f"sheet {si + 1}/{sheets_n}")
+    finally:
+        if prog is not None:
+            prog.done(f"{len(sheet_paths)} 张")
     render_s = round(time.perf_counter() - t_render, 2)
 
     _fill_document(doc, info, cells, frames, cuts, sheet_paths, cell_w, cell_h,
                    start, end, envelope, budget,
                    timings={"cuts": cuts_s, "grab": grab_s, "audio": audio_s,
-                            "render": render_s})
+                            "render": render_s},
+                   workers=workers)
 
     total = round(sum(v for k, v in doc.metadata["storyboard"]["timings"].items()
                       if k != "total"), 2)
@@ -112,8 +183,17 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
     return doc
 
 
+def _workers(requested: int = 0) -> int:
+    """智能线程数：小任务单线程，多核时最多 4 个。"""
+    if requested and requested > 0:
+        return max(1, min(int(requested), 8))
+    cpus = os.cpu_count() or 1
+    return 1 if cpus <= 2 else min(4, cpus)
+
+
 # ── 切点检测 ─────────────────────────────────────────────────
-def _detect_cuts(path: str, start: float, end: float, doc: Document) -> List[float]:
+def _detect_cuts(path: str, start: float, end: float, doc: Document,
+                 progress=None, total_frames: Optional[int] = None) -> List[float]:
     """HSV 三通道差分找场景切换点（C 层 ImageChops，约 6-7 次/秒采样）。"""
     import av
     from PIL import ImageChops, ImageStat
@@ -123,51 +203,71 @@ def _detect_cuts(path: str, start: float, end: float, doc: Document) -> List[flo
     prev_t = None
     span = max(end - start, 0.1)
     min_dt = 0.15 if span <= 600 else 0.25
+    note = ""
+    if progress is not None:
+        # 跳过非参考帧后无法预知真实帧数，这里用 spinner + 已用时间，避免虚假 ETA
+        progress.stage("扫描切点")
     try:
-        with av.open(path) as c:
-            stream = c.streams.video[0]
-            stream.thread_type = "AUTO"
-            for frame in c.decode(stream):
-                t = _frame_time(frame, stream)
-                if t is None:
-                    continue
-                if t < start:
-                    continue
-                if t > end:
-                    break
-                if prev_t is not None and t - prev_t < min_dt:
-                    continue
+        try:
+            with av.open(path) as c:
+                stream = c.streams.video[0]
+                stream.thread_type = "AUTO"
+                # 切点扫描只需参考帧（I/P）：跳过非参考帧可省近一半解码时间，
+                # 采样密度仍远高于 0.15s/次的要求，切点数量实测不受影响。
                 try:
-                    img = frame.reformat(width=64, height=36, format="rgb24").to_image()
+                    stream.codec_context.skip_frame = "NONREF"
                 except Exception:
-                    img = frame.to_image().convert("RGB").resize((64, 36))
-                hsv = img.convert("HSV")
-                if prev is not None:
-                    stat = ImageStat.Stat(ImageChops.difference(prev, hsv))
-                    samples.append((t, sum(stat.mean)))   # |ΔH|+|ΔS|+|ΔV| 的均值之和
-                prev, prev_t = hsv, t
-    except Exception as e:
-        doc.warnings.append(f"切点检测失败，退化为均匀分格：{type(e).__name__}: {e}")
-        return []
+                    pass
+                for frame in c.decode(stream):
+                    t = _frame_time(frame, stream)
+                    if t is None:
+                        continue
+                    if t < start:
+                        continue
+                    if t > end:
+                        break
+                    if progress is not None:
+                        progress.update(note=f"{t:.0f}s")
+                    if prev_t is not None and t - prev_t < min_dt:
+                        continue
+                    try:
+                        img = frame.reformat(width=64, height=36,
+                                             format="rgb24").to_image()
+                    except Exception:
+                        img = frame.to_image().convert("RGB").resize((64, 36))
+                    hsv = img.convert("HSV")
+                    if prev is not None:
+                        stat = ImageStat.Stat(ImageChops.difference(prev, hsv))
+                        samples.append((t, sum(stat.mean)))  # |ΔH|+|ΔS|+|ΔV| 均值之和
+                    prev, prev_t = hsv, t
+        except Exception as e:
+            doc.warnings.append(f"切点检测失败，退化为均匀分格：{type(e).__name__}: {e}")
+            note = "失败，已退化"
+            return []
 
-    if not samples:
-        return []
+        if not samples:
+            note = "无采样"
+            return []
 
-    desired = max(1, min(200, int(span / 1.5)))
-    scores = sorted((s for _, s in samples), reverse=True)
-    threshold = max(12.0, scores[min(len(scores) - 1, desired - 1)] * 0.85)
+        desired = max(1, min(200, int(span / 1.5)))
+        scores = sorted((s for _, s in samples), reverse=True)
+        threshold = max(12.0, scores[min(len(scores) - 1, desired - 1)] * 0.85)
 
-    cuts: List[float] = []
-    last = -10.0
-    for i, (t, score) in enumerate(samples):
-        if score < threshold or t - last < 0.35:
-            continue
-        left = samples[i - 1][1] if i else -1
-        right = samples[i + 1][1] if i + 1 < len(samples) else -1
-        if score >= left and score >= right:
-            cuts.append(round(t, 3))
-            last = t
-    return cuts
+        cuts: List[float] = []
+        last = -10.0
+        for i, (t, score) in enumerate(samples):
+            if score < threshold or t - last < 0.35:
+                continue
+            left = samples[i - 1][1] if i else -1
+            right = samples[i + 1][1] if i + 1 < len(samples) else -1
+            if score >= left and score >= right:
+                cuts.append(round(t, 3))
+                last = t
+        note = f"{len(cuts)} 个切点"
+        return cuts
+    finally:
+        if progress is not None:
+            progress.done(note)
 
 
 def _frame_time(frame, stream) -> Optional[float]:
@@ -223,49 +323,103 @@ def _plan_cells(cuts: List[float], start: float, end: float,
 
 # ── 取帧 ─────────────────────────────────────────────────────
 def _grab_cell_frames(path: str, cells, cell_w: int, cell_h: int,
-                      doc: Document) -> dict:
-    """每格取 3 个候选帧，按 Laplacian 方差保留最清晰的一张。"""
+                      doc: Document, progress=None, workers: int = 1) -> dict:
+    """每格取 3 个候选帧，按 Laplacian 方差保留最清晰的一张。
+
+    候选帧的缩放与锐度计算可并行：解码仍在主线程顺序进行，
+    只把「转图 + 拉普拉斯」提交到线程池，并用在途上限控制内存。
+    """
     import av
-    from PIL import Image, ImageFilter, ImageStat
 
     pending = []
     for i, (a, b) in enumerate(cells):
         for frac in (0.3, 0.55, 0.8):
             pending.append((a + (b - a) * frac, i))
     pending.sort()
+    total = len(pending)
 
     best = {}
+    note = ""
+    if progress is not None:
+        progress.stage("抽取画面", total=total)
+
+    def merge(item):
+        if not item:
+            return
+        idx, sharp, img, t = item
+        if idx not in best or sharp > best[idx][0]:
+            best[idx] = (sharp, img, t)
+        if progress is not None:
+            progress.update(note=f"{len(best)}/{len(cells)} 格")
+
+    def process(frame, target, idx):
+        try:
+            return _frame_candidate(frame, target, idx, cell_w, cell_h)
+        except Exception:
+            return None
+
     try:
         with av.open(path) as c:
             stream = c.streams.video[0]
             stream.thread_type = "AUTO"
-            for frame in c.decode(stream):
-                t = _frame_time(frame, stream)
-                if t is None:
-                    continue
-                while pending and t >= pending[0][0] - 0.02:
-                    target, idx = pending.pop(0)
-                    if t - target > 1.5:
+            if workers > 1 and total >= 6:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=workers,
+                                        thread_name_prefix="atb-frame") as pool:
+                    inflight = []
+                    for frame in c.decode(stream):
+                        t = _frame_time(frame, stream)
+                        if t is None:
+                            continue
+                        while pending and t >= pending[0][0] - 0.02:
+                            target, idx = pending.pop(0)
+                            if t - target > 1.5:
+                                continue
+                            inflight.append(pool.submit(process, frame, target, idx))
+                            if len(inflight) >= workers * 3:
+                                for fut in inflight:
+                                    merge(fut.result())
+                                inflight.clear()
+                        if not pending:
+                            break
+                    for fut in inflight:
+                        merge(fut.result())
+            else:
+                for frame in c.decode(stream):
+                    t = _frame_time(frame, stream)
+                    if t is None:
                         continue
-                    try:
-                        img = frame.reformat(width=cell_w, height=cell_h,
-                                             format="rgb24").to_image()
-                    except Exception:
-                        img = frame.to_image().convert("RGB")
-                        img.thumbnail((cell_w, cell_h), Image.LANCZOS)
-                    gray = img.convert("L")
-                    lap = gray.filter(ImageFilter.Kernel(
-                        (3, 3), [0, 1, 0, 1, -4, 1, 0, 1, 0], scale=1))
-                    sharp = ImageStat.Stat(lap).var[0]
-                    if idx not in best or sharp > best[idx][0]:
-                        best[idx] = (sharp, img, round(t, 2))
-                if not pending:
-                    break
+                    while pending and t >= pending[0][0] - 0.02:
+                        target, idx = pending.pop(0)
+                        if t - target > 1.5:
+                            continue
+                        merge(process(frame, target, idx))
+                    if not pending:
+                        break
+        note = f"{len(best)}/{len(cells)} 格"
     except Exception as e:
         doc.warnings.append(f"取帧失败：{type(e).__name__}: {e}")
+    finally:
+        if progress is not None:
+            progress.done(note)
     if len(best) < len(cells):
         doc.warnings.append(f"{len(cells) - len(best)} 个格子未取到画面")
     return best
+
+
+def _frame_candidate(frame, target: float, idx: int, cell_w: int, cell_h: int):
+    """把一个候选帧缩到格尺寸并计算清晰度（线程池中执行）。"""
+    from PIL import Image, ImageFilter, ImageStat
+
+    try:
+        img = frame.reformat(width=cell_w, height=cell_h, format="rgb24").to_image()
+    except Exception:
+        img = frame.to_image().convert("RGB")
+        img.thumbnail((cell_w, cell_h), Image.LANCZOS)
+    gray = img.convert("L")
+    lap = gray.filter(ImageFilter.Kernel(
+        (3, 3), [0, 1, 0, 1, -4, 1, 0, 1, 0], scale=1))
+    return idx, ImageStat.Stat(lap).var[0], img, round(target, 2)
 
 
 # ── 音频包络 ─────────────────────────────────────────────────
@@ -451,7 +605,8 @@ def _output_dir(path: str) -> str:
 
 def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
                    cell_w: int, cell_h: int, start: float, end: float, envelope,
-                   budget: int, timings: Optional[dict] = None):
+                   budget: int, timings: Optional[dict] = None,
+                   workers: int = 1):
     from PIL import Image
 
     doc.blocks.append(Block("heading", "视频分镜（实验性）", level=1))
@@ -495,6 +650,7 @@ def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
         ],
         "upstream": "https://github.com/SAOS-3624/dsh-video-storyboard",
         "timings": timings or {},
+        "workers": workers,
     }
     doc.warnings.append("⚠ 实验性功能：分镜参数与输出结构可能变化")
     doc.warnings.append("本实现不含 ASR/台词转写；音频仅以包络形式呈现")

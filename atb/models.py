@@ -70,6 +70,10 @@ class ReadOptions:
     sheets: int = 1                    # 分几张图
     storyboard_budget: int = 1_200_000  # 单张图像素预算
 
+    # ── 运行期（不参与序列化）──
+    progress: Optional[object] = None  # 进度回调（CLI 传入，MCP 为 None）
+    threads: int = 0                   # 工作线程数，0 = 自动
+
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "ReadOptions":
         data = data or {}

@@ -48,13 +48,17 @@ class VideoReader(BaseReader):
         frames: List[dict] = []
         if info and info.get("has_video"):
             out_dir = _frame_dir(path, opts.frame_dir)
+            prog = getattr(opts, "progress", None)
             try:
                 frames = _extract_frames(path, duration, start, end, frame_count,
                                          opts.frame_width, opts.frame_quality,
-                                         opts.sampling, out_dir, doc)
+                                         opts.sampling, out_dir, doc,
+                                         progress=prog, total_frames=info.get("frames_total"))
             except Exception as e:  # 抽帧失败不应让整个解析失败
                 doc.warnings.append(f"抽帧失败：{type(e).__name__}: {e}")
                 out_dir = None
+                if prog is not None:
+                    prog.close()
             if frames:
                 doc.metadata["frames"] = frames
                 doc.metadata["frame_dir"] = out_dir
@@ -62,7 +66,9 @@ class VideoReader(BaseReader):
                 audio = _extract_audio(path, out_dir) if out_dir else None
                 if audio:
                     doc.metadata["audio_path"] = audio
-                elif not info.get("audio_codec"):
+                elif info.get("audio_codec"):
+                    doc.warnings.append("音轨导出失败（编码不受容器支持），已跳过")
+                else:
                     doc.warnings.append("该视频没有音轨，未导出音频")
 
         _build_blocks(doc, info, frames, duration)
@@ -168,7 +174,8 @@ def _frame_dir(path: str, custom: Optional[str]) -> str:
 
 
 def _extract_frames(path, duration, start, end, count, width, quality,
-                    sampling, out_dir, doc: Document) -> List[dict]:
+                    sampling, out_dir, doc: Document, progress=None,
+                    total_frames=None) -> List[dict]:
     try:
         import av
         from PIL import Image
@@ -192,31 +199,39 @@ def _extract_frames(path, duration, start, end, count, width, quality,
     frames: List[dict] = []
     pending = sorted(times)
     idx = 0
-    with av.open(path) as c:
-        stream = c.streams.video[0]
-        stream.thread_type = "AUTO"
-        for frame in c.decode(stream):
-            t_frame = _frame_time(frame, stream)
-            if t_frame is None:
-                continue
-            while pending and t_frame + 1e-3 >= pending[0]:
-                target = pending.pop(0)
-                idx += 1
-                img = frame.to_image().convert("RGB")
-                img.thumbnail((width, width), Image.LANCZOS)
-                name = f"frame_{idx:03d}_t{target:07.2f}s.jpg"
-                fp = os.path.join(out_dir, name)
-                img.save(fp, "JPEG", quality=quality, optimize=True)
-                frames.append({
-                    "index": idx,
-                    "time": round(target, 2),
-                    "path": fp,
-                    "width": img.width,
-                    "height": img.height,
-                    "bytes": os.path.getsize(fp),
-                })
-            if not pending:
-                break
+    if progress is not None:
+        progress.stage("解码视频", total=total_frames)
+    try:
+        with av.open(path) as c:
+            stream = c.streams.video[0]
+            stream.thread_type = "AUTO"
+            for frame in c.decode(stream):
+                t_frame = _frame_time(frame, stream)
+                if t_frame is None:
+                    continue
+                if progress is not None:
+                    progress.update(note=f"{t_frame:.0f}s")
+                while pending and t_frame + 1e-3 >= pending[0]:
+                    target = pending.pop(0)
+                    idx += 1
+                    img = frame.to_image().convert("RGB")
+                    img.thumbnail((width, width), Image.LANCZOS)
+                    name = f"frame_{idx:03d}_t{target:07.2f}s.jpg"
+                    fp = os.path.join(out_dir, name)
+                    img.save(fp, "JPEG", quality=quality, optimize=True)
+                    frames.append({
+                        "index": idx,
+                        "time": round(target, 2),
+                        "path": fp,
+                        "width": img.width,
+                        "height": img.height,
+                        "bytes": os.path.getsize(fp),
+                    })
+                if not pending:
+                    break
+    finally:
+        if progress is not None:
+            progress.done(f"{len(frames)} 帧")
     if pending:
         doc.warnings.append(f"{len(pending)} 个目标时间点超出可解码范围，已跳过")
     if not frames:
@@ -267,30 +282,70 @@ def _keyframe_times(path: str, start: float, end: float, count: int) -> List[flo
 
 
 def _extract_audio(path: str, out_dir: str) -> Optional[str]:
-    """把音轨原样导出（stream copy），供具备音频能力的模型或外部工具使用。"""
+    """把音轨原样导出（stream copy），供具备音频能力的模型或外部工具使用。
+
+    PyAV 19 起 add_stream(template=...) 改为 add_stream_from_template()，
+    旧版本仍用 template 关键字；这里做兼容。容器不兼容时按候选扩展名重试。
+    """
     try:
         import av
     except ImportError:
         return None
+
+    for ext in _audio_exts(path):
+        out_path = os.path.join(out_dir, "audio" + ext)
+        try:
+            with av.open(path) as src:
+                if not src.streams.audio:
+                    return None
+                stream = src.streams.audio[0]
+                with av.open(out_path, "w") as dst:
+                    out_stream = _add_template_stream(dst, stream)
+                    for packet in src.demux(stream):
+                        if packet.dts is None:
+                            continue
+                        packet.stream = out_stream
+                        dst.mux(packet)
+            if os.path.getsize(out_path) > 0:
+                return out_path
+        except Exception:
+            pass
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+    return None
+
+
+def _add_template_stream(dst, src_stream):
+    """兼容 PyAV 新旧 API：从已有流创建输出流。"""
+    fn = getattr(dst, "add_stream_from_template", None)
+    if fn is not None:
+        return fn(src_stream)
+    return dst.add_stream(template=src_stream)
+
+
+def _audio_exts(path: str):
+    """按音频编码给出容器候选顺序。"""
+    codec = ""
     try:
+        import av
         with av.open(path) as src:
-            if not src.streams.audio:
-                return None
-            stream = src.streams.audio[0]
-            codec = (stream.codec_context.name or "").lower()
-            ext = {"aac": ".m4a", "mp3": ".mp3", "opus": ".ogg",
-                   "vorbis": ".ogg", "flac": ".flac"}.get(codec, ".mka")
-            out_path = os.path.join(out_dir, "audio" + ext)
-            with av.open(out_path, "w") as dst:
-                out_stream = dst.add_stream(template=stream)
-                for packet in src.demux(stream):
-                    if packet.dts is None:
-                        continue
-                    packet.stream = out_stream
-                    dst.mux(packet)
-            return out_path
+            if src.streams.audio:
+                codec = (src.streams.audio[0].codec_context.name or "").lower()
     except Exception:
-        return None
+        pass
+    if codec.startswith("pcm"):
+        return [".wav", ".mka"]
+    if codec.startswith("aac") or codec == "alac":
+        return [".m4a", ".mka"]
+    if codec.startswith("mp3"):
+        return [".mp3", ".mka"]
+    if codec in ("opus", "vorbis"):
+        return [".ogg", ".mka"]
+    if codec.startswith("flac"):
+        return [".flac", ".mka"]
+    return [".mka", ".wav"]
 
 
 # ── 输出与预算 ───────────────────────────────────────────────
