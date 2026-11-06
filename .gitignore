@@ -17,6 +17,11 @@ build.log
 .tmp_samples/
 .screenshots/
 
+# 宣传物料（视频/音频体积大，不入库）
+promo/*.mp4
+promo/*.mp3
+promo/cover.png
+
 # 编辑器
 .idea/
 .vscode/

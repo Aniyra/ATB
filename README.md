@@ -32,6 +32,7 @@ ATB 的做法：**统一探测 → 统一解析 → 统一 Document schema → �
 | 安全默认 | 压缩包只列目录、不自动解压（防 Zip Slip）；大文件按字节/字符双重截断 |
 | 错误码体系 | `ATB-Eccnnn`，每条都带**成因 + 分步解决方案**，Agent 可据此自主决策 |
 | 三种接入 | CLI 子命令、`import atb` Python API、stdio MCP Server（零额外依赖） |
+| 可选增强 | 额度查询、历史对话压缩；电脑操作（实验性，仅 Windows） |
 
 ---
 
@@ -54,7 +55,7 @@ ATB 的做法：**统一探测 → 统一解析 → 统一 Document schema → �
 | 图片 | `png` `jpg` `webp` `gif` `tiff` `bmp` `heic` `avif` `psd` `ico` | 尺寸、模式、EXIF、帧数；可选 OCR |
 | 音视频 | `mp3` `flac` `wav` `m4a` `ogg` `opus` · `mp4` `mkv` `avi` `mov` `webm` | 时长、码率、采样率、标签；有 ffprobe 时输出完整流信息 |
 | 视频理解 | `mp4` `mkv` `avi` `mov` `webm` | **逐帧抽帧 + 时间轴 + MCP 图片回传**，让视觉模型真正看到画面；可导出音轨 |
-| 视频分镜（实验性） | `mp4` `mkv` `avi` `mov` `webm` | **一张宫格图看全片**：编号 + 时间码 + 音频包络，按剪辑密度分格，格内取最清晰帧 |
+| 视频分镜 | `mp4` `mkv` `avi` `mov` `webm` | **一张宫格图看全片**：编号 + 时间码 + 音频包络，按剪辑密度分格，格内取最清晰帧 |
 | 压缩包 | `zip` `7z` `rar` `tar` `gz` `bz2` `xz` `jar` `apk` `whl` `iso` | 条目清单、压缩率、加密检测、`--member` 读取内部文本 |
 | 字幕 | `srt` `vtt` `ass` `ssa` `lrc` | 逐条字幕 + 时间轴 |
 | 邮件 | `eml` `msg` `mbox` | 主题/收发人/正文/附件清单 |
@@ -179,9 +180,7 @@ MCP 模式下 `atb_read_video` 会把帧作为 **image content** 直接回传，
 都明确要求模型：若自身不具备视觉能力，必须直接告诉用户「无法查看画面」，
 不得根据文件名或元数据臆测内容。`atb_video_guide` 可随时查询完整预算指南。
 
-### 实验性：视频分镜（Storyboard）
-
-> ⚠ 实验性功能：参数、阈值与输出结构可能随版本调整，不建议用于稳定流水线。
+### 视频分镜（Storyboard）
 
 把整段视频压成**一张可寻址的宫格图**：每格带编号与时间码，格位按剪辑密度分配
 （快切区格子更短、更密），格内从 3 个候选帧里按 Laplacian 方差挑最清晰的一张，
@@ -196,6 +195,9 @@ python main.py storyboard "D:\videos\demo.mp4" --cells 12 --sheets 2 --budget 12
 
 :: 只看某一段
 python main.py storyboard "D:\videos\demo.mp4" --start 60 --end 180
+
+:: 对齐台词（省略时自动查找视频同名 .srt/.vtt）
+python main.py storyboard "D:\videos\demo.mp4" --subs "D:\videos\demo.srt"
 ```
 
 MCP 工具 `atb_video_storyboard` 会把宫格图作为 image content 直接回传。实测对比
@@ -220,9 +222,98 @@ MCP 工具 `atb_video_storyboard` 会把宫格图作为 image content 直接回�
 
 算法思路参考开源项目 [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard)
 （Apache-2.0），本项目为基于 PyAV + Pillow 的独立 Python 实现，未复制其源码。
-与上游的差异：不依赖 ffmpeg 可执行文件、**不含 ASR/台词转写**、不支持 URL 输入。
+与上游的差异：不依赖 ffmpeg 可执行文件、**不含 ASR（但支持外挂 srt/vtt 字幕对齐台词）**、不支持 URL 输入。
 
-推荐工作流：先用分镜图建立全片概览，再用 `atb_read_video --start/--end` 对关键段细看。
+推荐工作流：先用分镜图建立全片概览，再用 `atb_read_video --start/--end` 对关键段细看，
+对看不清的小字/图表用 `atb_video_zoom` 放大该时间点的局部。
+
+### 视频局部放大（Zoom）
+
+分镜图里某格看不清时，按时间点取**全分辨率原帧**，可按归一化区域裁剪放大：
+
+```bat
+:: 120 秒处的整帧（1600px 宽）
+python main.py zoom "D:\videos\demo.mp4" --at 120
+
+:: 只看左上角区域（x,y,w,h 均为 0-1）
+python main.py zoom "D:\videos\demo.mp4" --at 120 --box 0.1,0.1,0.4,0.4 --width 1920
+```
+
+MCP 工具 `atb_video_zoom` 返回一张 image content，用于读代码、看接口文档、核对表格数字。
+
+### 查询 API 额度（可选）
+
+不配置也能用，未配置时只提示如何配置，不会报错。配置优先级：环境变量 > 配置文件。
+
+```bat
+:: 生成模板（~/.atb/config.json）
+python main.py quota --init
+
+:: 直接写入密钥（自动脱敏显示）
+python main.py quota --set deepseek=sk-xxxx
+
+:: 查询全部 / 单个提供商
+python main.py quota
+python main.py quota --provider moonshot --json
+
+:: 查看配置来源（不显示明文）
+python main.py quota --show
+```
+
+| 提供商 | 环境变量 | 接口 |
+|---|---|---|
+| DeepSeek | `DEEPSEEK_API_KEY` | 余额 |
+| Moonshot | `MOONSHOT_API_KEY` | 余额 |
+| SiliconFlow | `SILICONFLOW_API_KEY` | 账户信息 |
+| OpenRouter | `OPENROUTER_API_KEY` | Credits |
+
+MCP 工具 `atb_query_quota` 可直接查询；这属于唯一会主动联网的功能。
+
+### 历史对话压缩（Context）
+
+上下文将满或要把任务交接给另一个 Agent 时，把对话存档压成可续接的结构化摘要
+（**确定性抽取，不调用模型**）：
+
+```bat
+python main.py ctx "D:\logs\session.jsonl" --target-tokens 6000 --keep-recent 8
+python main.py ctx "D:\logs\chat.md" --out "D:\logs\handoff.md"
+```
+
+支持的输入：`json`（`messages` 数组）、`jsonl`（每行一条）、`markdown` / 纯文本
+（`用户：` / `User:` 形式）。产物包含：目标与决策、关键文件/命令/错误码、
+早期对话单行摘要、最近若干轮原文、续接提示；预算超出时会自动继续裁剪。
+MCP 工具：`atb_compress_history`。
+
+### 电脑操作（实验性 · 仅 Windows）
+
+> ⚠ 实验性：行为可能随版本调整，不保证在所有应用上可用；失败时应视为可选能力缺失。
+> 仅支持 Windows，核心文件读取能力不受影响（非 Windows 导入本模块也不会报错）。
+
+复刻 Trae **Computer Use** 的基础能力，用 ctypes 调 Win32 API，**不需要新增依赖**：
+
+```bat
+python main.py cu available                 :: 能力检测
+python main.py cu list                      :: 可见窗口（app_id / 标题 / PID / 区域）
+python main.py cu state --app 记事本 --screenshot
+python main.py cu ground --app 记事本 --text "保存"
+python main.py cu click --app 记事本 --x 100 --y 200
+python main.py cu type --app 记事本 --text "你好"
+python main.py cu key --app 记事本 --keys ctrl+s
+python main.py cu launch --app "C:\Windows\notepad.exe"
+```
+
+| Trae 工具 | ATB 实现 | 说明 |
+|---|---|---|
+| `list_apps` / `launch_app` | `cu list` / `cu launch` | 枚举可见窗口、启动并等待窗口 |
+| `get_app_state` | `cu state` | UI 元素树 + 可选截图 |
+| `click` / `scroll` / `drag` | `cu click` / `click --x/--y` … | 屏幕坐标或 element_id |
+| `type_text` / `press_key` | `cu type` / `cu key` | Unicode 输入、组合键 |
+| `set_value` / `perform_action` / `select_text` | `cu set_value` / `action` / `select` | 优先 UIA，失败降级为点击+输入 |
+| `grounding` | `cu ground` | 按可见文本定位元素 |
+| `resolve_recorded_step` / `verify_recorded_step` | — | 录制回放未实现 |
+
+UI 元素树优先用可选依赖 `uiautomation`（`pip install uiautomation`）；未安装时退化为
+Win32 子窗口枚举，此时用 `--screenshot` + 坐标操作。MCP 工具：`atb_computer_use`。
 
 不带参数运行进入**交互菜单**：
 
@@ -232,7 +323,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ATB (All Tool Box)  v1.2.0                                               │
+│ ATB (All Tool Box)  v1.3.0                                               │
 │ 面向 AI Agent 的全格式文件读取工具箱                                      │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -245,7 +336,10 @@ python main.py
   [7] 启动 MCP Server（stdio）
   [8] 错误码速查
   [9] 视频抽帧（供视觉模型理解）
-  [10] 视频分镜图（实验性）
+  [10] 视频分镜图（一张图看全片）
+  [11] 查询 API 额度（可选）
+  [12] 压缩历史对话（上下文续接）
+  [13] 电脑操作（实验性 · 仅 Windows）
   [0] 退出
 ```
 
@@ -315,8 +409,12 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 |---|---|
 | `atb_read_file` | 读取任意文件，返回完整 Document（元数据 + 块 + 文本） |
 | `atb_read_video` | 抽帧并回传 **image content**，让视觉模型直接看画面；带时间轴与预算提示 |
-| `atb_video_storyboard` | **实验性**：整段视频 → 一张宫格分镜图（编号/时间码/音频包络），token 更省 |
+| `atb_video_storyboard` | 整段视频 → 一张宫格分镜图（编号/时间码/音频包络/台词），token 更省 |
+| `atb_video_zoom` | 按时间点取全分辨率画面，可按区域裁剪放大，用于看细节 |
 | `atb_video_guide` | 视频预算指南：MB 建议、token 公式、不同上下文窗口的帧数上限 |
+| `atb_query_quota` | 查询 AI API 余额（可选，未配置时返回配置指引） |
+| `atb_compress_history` | 把长对话压成可续接摘要（确定性抽取，不调用模型） |
+| `atb_computer_use` | **实验性**：操作 Windows 桌面应用（复刻 Trae Computer Use 基础能力） |
 | `atb_extract_text` | 只返回纯文本，适合直接进上下文 |
 | `atb_file_info` | 轻量探测：格式/MIME/大小/SHA256 |
 | `atb_scan_directory` | 扫描目录，统计格式分布 |
@@ -325,6 +423,17 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 | `atb_list_formats` | 查询支持的格式矩阵 |
 
 工具出错时返回 `isError: true` 与完整错误码/解决方案，Agent 可据此重试。
+
+### Agent 协作约定（已写入 initialize.instructions）
+
+所有通过 MCP 接入的 Agent 都会收到以下行为约束：
+
+1. **禁止闷头干**：动手前先说明要做什么；不确定时先向用户提问，不要臆测缺失信息。
+2. **小步总结**：每完成一个小步骤，用**一句话**给出结论（改了什么、结果如何）。
+3. **大步总结**：每完成一个大阶段，用**一段话**总结结果、遗留问题与下一步。
+4. **能力声明**：不具备图像/音频输入能力时，必须如实说明，不得根据文件名或元数据编造内容。
+5. **实验性边界**：`atb_computer_use` 仅 Windows、不保证兼容；有副作用的操作先征得用户同意，失败不要反复盲试。
+6. **上下文管理**：上下文将满或需要交接时，用 `atb_compress_history` 生成续接摘要。
 
 ---
 
@@ -377,6 +486,9 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 | `E09xxx` | 输出写入 |
 | `E10xxx` | MCP 协议 |
 | `E11xxx` | 依赖缺失 |
+| `E12xxx` | 额度服务：密钥无效、接口不可达 |
+| `E13xxx` | 电脑控制：平台不支持、窗口/元素定位失败 |
+| `E14xxx` | 上下文压缩：对话存档无法解析 |
 
 查询：
 
@@ -385,7 +497,7 @@ python main.py err                :: 分类总览 + 用法
 python main.py err 01001          :: 单条详情（完整解决方案，自动换行）
 python main.py err 01             :: 按类别列出（01 / 文件访问 / PDF 都行）
 python main.py err pdf            :: 关键词搜索
-python main.py err --all          :: 展开全部 27 条
+python main.py err --all          :: 展开全部 33 条
 python main.py err --json         :: 结构化输出，便于程序消费
 ```
 
@@ -451,6 +563,9 @@ ATB/
 │  ├─ mcp.py              stdio MCP Server（JSON-RPC 2.0）
 │  ├─ ui.py               ANSI 颜色、横幅、等宽表格
 │  ├─ progress.py         进度条 / spinner / ETA（stderr，TTY 自动启用）
+│  ├─ storyboard.py       视频分镜：切点检测 / 分格 / 宫格图 / 字幕对齐
+│  ├─ quota.py            可选额度查询（环境变量 + ~/.atb/config.json）
+│  ├─ history.py          历史对话压缩（json/jsonl/md/纯文本 → 续接摘要）
 │  ├─ errors.py           错误码体系与错误日志
 │  ├─ readers/
 │  │  ├─ base.py          基类、编码探测、页码解析、Document 构造
@@ -464,8 +579,8 @@ ATB/
 │  │  ├─ archive.py       ZIP / TAR / 7Z / RAR / GZ / BZ2 / XZ
 │  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
 │  └─ experimental/
-│     └─ storyboard.py    【实验性】场景分镜：切点检测 / 分格 / 宫格图（PyAV + Pillow）
-├─ tests/                 单元测试（标准库 unittest，56 用例）
+│     └─ computer.py      【实验性】电脑控制：窗口/元素树/点击/输入（Win32，仅 Windows）
+├─ tests/                 单元测试（标准库 unittest，81 用例）
 ├─ reports/               运行期错误日志（自动创建）
 ├─ requirements.txt
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
@@ -488,7 +603,9 @@ python -m unittest discover -s tests -v
 覆盖：格式探测（魔术字节、ZIP 细分、强制格式）、读取链路（文本/Markdown/GBK/CSV/JSON/JSONL/压缩包/成员读取）、
 错误处理（缺失文件、目录、safe 模式）、错误码归一化、目录扫描、MCP 协议（initialize / tools/list / tools/call /
 错误返回 / 未知方法 / Content-Length 分帧）、视频抽帧（现场编码小视频后读取、时间窗、帧差异、关键帧采样、
-MCP image content 回传）、实验性分镜（切点检测、多图分格、时间窗、音频包络与导出、MCP 宫格图回传）、
+MCP image content 回传）、视频分镜（切点检测、多图分格、时间窗、字幕对齐、局部放大、音频包络与导出、
+MCP 宫格图回传）、额度查询（配置读写、环境变量、脱敏、解析器）、历史对话压缩（json/jsonl/纯文本解析、
+去重、预算裁剪、MCP 回传）、电脑控制（按键解析、窗口枚举、错误码；不执行有副作用的操作）、
 进度组件（进度/ETA、spinner、禁用态）。
 
 ---
@@ -497,7 +614,8 @@ MCP image content 回传）、实验性分镜（切点检测、多图分格、�
 
 - **只读**：ATB 不对源文件做任何写操作（`--out` 除外，且只写你指定的路径）。
 - **不解压**：压缩包默认只列目录；读取内部条目时仅在内存中解压，不落盘，避免 Zip Slip。
-- **不联网**：除可选依赖安装外，运行期无任何网络请求。
+- **默认不联网**：核心能力零网络请求；仅 `atb quota` / `atb_query_quota` 会请求你配置的额度接口。
+- **电脑控制需显式调用**：只有 `atb cu` / `atb_computer_use` 会操作键鼠；读取文件时不会自动触发。
 - **隐私**：文件内容只在本机处理；MCP 模式下内容由客户端决定是否发送给模型。
 
 ---
@@ -506,7 +624,11 @@ MCP image content 回传）、实验性分镜（切点检测、多图分格、�
 
 - 视频分镜的算法思路参考 [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard)
   （Apache-2.0）：HSV 三通道切点检测、按局部剪辑密度分配格位、Laplacian 方差选帧、音频包络同轴绘制。
-  本项目为基于 PyAV + Pillow 的独立 Python 实现，**未复制其源码**；差异见「实验性：视频分镜」。
+  本项目为基于 PyAV + Pillow 的独立 Python 实现，**未复制其源码**；差异见「视频分镜」。
+- 局部放大、分镜定位与配置集中化的思路参考 [SAOS-3624/dsh-watch-together](https://github.com/SAOS-3624/dsh-watch-together)；
+  额度查询、历史对话压缩、电脑控制为 ATB 自有实现。
+- 电脑控制能力对标 Trae CN 的 **Computer Use** 内置工具集（list_apps / get_app_state / click / type_text …），
+  本项目用 ctypes + Win32 API 独立复刻基础版本，未使用其源码。
 - PDF / Office / 压缩包 / 视频解码等能力来自 PyMuPDF、python-docx、openpyxl、python-pptx、py7zr、PyAV 等开源项目，详见 [requirements.txt](requirements.txt)。
 
 ---

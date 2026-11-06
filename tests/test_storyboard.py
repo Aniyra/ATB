@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""实验性分镜功能测试：现场编码带切点的视频，验证分格、出图与 MCP 回传。"""
+"""场景分镜功能测试：现场编码带切点的视频，验证分格、出图与 MCP 回传。"""
 
 import base64
 import importlib.util
@@ -59,7 +59,7 @@ class StoryboardTest(unittest.TestCase):
         self.assertEqual(doc.format, "video")
         self.assertIn("storyboard", doc.metadata)
         sb = doc.metadata["storyboard"]
-        self.assertTrue(sb["experimental"])
+        self.assertNotIn("experimental", sb)
         self.assertEqual(sb["cells"], 6)
         self.assertEqual(len(sb["sheets"]), 1)
         self.assertGreater(sb["tokens_estimate"], 0)
@@ -73,7 +73,28 @@ class StoryboardTest(unittest.TestCase):
 
         images = [b for b in doc.blocks if b.type == "image"]
         self.assertEqual(len(images), 1)
-        self.assertTrue(any("实验性" in w for w in doc.warnings))
+        self.assertTrue(any("启发式" in w for w in doc.warnings))
+
+    def test_subtitles_align_to_cells(self):
+        srt = os.path.splitext(self.video)[0] + ".srt"
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,200 --> 00:00:01,800\n第一段台词\n\n"
+                    "2\n00:00:02,200 --> 00:00:04,500\n第二段台词\n")
+        doc = read_file(self.video, ReadOptions(storyboard=True, cells=3))
+        sb = doc.metadata["storyboard"]
+        self.assertTrue(sb["has_subtitles"])
+        lines = [line for c in sb["cell_table"] for line in c.get("lines", [])]
+        self.assertIn("第一段台词", lines)
+        self.assertIn("第二段台词", lines)
+
+    def test_zoom_region(self):
+        from atb.readers.video import export_zoom
+
+        result = export_zoom(self.video, 1.0, [0.1, 0.1, 0.4, 0.4], width=400)
+        self.assertTrue(os.path.exists(result["path"]))
+        self.assertEqual(result["width"], 400)
+        self.assertGreater(result["height"], 0)
+        self.assertLessEqual(result["tokens_estimate"], 400)
 
     def test_multiple_sheets(self):
         doc = read_file(self.video, ReadOptions(storyboard=True, cells=6, sheets=2))
@@ -117,7 +138,7 @@ class StoryboardTest(unittest.TestCase):
         content = results[2]["result"]["content"]
         text = content[0]["text"]
         images = [c for c in content if c["type"] == "image"]
-        self.assertIn("实验性", text)
+        self.assertIn("视频分镜", text)
         self.assertEqual(len(images), 1)
         self.assertEqual(base64.b64decode(images[0]["data"])[:3], b"\xff\xd8\xff")
 

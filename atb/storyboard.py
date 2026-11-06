@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""实验性功能：视频场景分镜（Storyboard）。
+"""视频场景分镜（Storyboard）。
 
 把一段视频压成「一张可寻址的宫格图」：每格带编号与时间码，格位按剪辑密度分配，
 格内取最清晰的一帧，底部叠加与画面同时间轴的音频包络。
@@ -10,23 +10,23 @@
   - 按局部剪辑密度分配格位，并吸附到真实切点
   - 每格取 3 个候选帧，按 Laplacian 方差选最清晰
   - 音频包络与画面同轴绘制
-与上游的差异：不依赖 ffmpeg 可执行文件、不含 ASR/台词转写、不支持 URL 输入。
-
-⚠ 实验性：输出结构、参数与阈值都可能随版本调整。
+  - 可选 SRT/VTT 字幕，按格对齐成「画面 + 台词」
+与上游的差异：不依赖 ffmpeg 可执行文件、不做 ASR、不支持 URL 输入。
 """
 
 import array
 import hashlib
 import math
 import os
+import re
 import time
 from typing import List, Optional, Tuple
 
 import config
-from ..errors import AtbError
-from ..models import Block, Document, ReadOptions
-from ..readers.base import new_document
-from ..readers.video import probe_video
+from .errors import AtbError
+from .models import Block, Document, ReadOptions
+from .readers.base import new_document
+from .readers.video import probe_video
 
 MAX_CELLS = 64
 DEFAULT_BUDGET = 1_200_000
@@ -41,6 +41,7 @@ ACCENT2 = (45, 212, 191)
 
 def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
     """生成分镜图，返回统一 Document（image 块指向生成的分镜图）。"""
+    t_all = time.perf_counter()
     try:
         import av  # noqa: F401
         from PIL import Image  # noqa: F401
@@ -65,8 +66,7 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
     if end - start < 0.5:
         raise AtbError("ATB-E00003", f"时间窗过短：{start}s – {end}s")
 
-    doc = new_document(path, det, "video.storyboard(experimental)")
-    doc.metadata["experimental"] = True
+    doc = new_document(path, det, "video.storyboard")
     if doc_end_note:
         doc.warnings.append(doc_end_note)
     doc.metadata.update({k: info.get(k) for k in
@@ -105,6 +105,19 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
     if len(cells) < requested:
         doc.warnings.append(f"请求 {requested} 张图，但只有 {len(cells)} 格，"
                             f"已输出 {sheets_n} 张")
+
+    # 字幕：显式传入优先，否则查找同名 .srt/.vtt；按格对齐成台词
+    sub_path = opts.subtitles or _find_subtitle(path)
+    cell_lines = None
+    if sub_path:
+        try:
+            cues = _load_subtitles(sub_path)
+            cell_lines = _attach_lines(cues, cells)
+            doc.metadata["subtitles"] = {"path": sub_path, "cues": len(cues)}
+        except AtbError:
+            raise
+        except Exception as e:
+            doc.warnings.append(f"字幕解析失败，已忽略：{type(e).__name__}: {e}")
 
     aspect = (info.get("width") or 16) / max(info.get("height") or 9, 1)
     budget = max(160_000, min(int(opts.storyboard_budget or DEFAULT_BUDGET), 8_000_000))
@@ -175,11 +188,10 @@ def build_storyboard(path: str, det, opts: ReadOptions) -> Document:
                    start, end, envelope, budget,
                    timings={"cuts": cuts_s, "grab": grab_s, "audio": audio_s,
                             "render": render_s},
-                   workers=workers)
+                   workers=workers, cell_lines=cell_lines)
 
-    total = round(sum(v for k, v in doc.metadata["storyboard"]["timings"].items()
-                      if k != "total"), 2)
-    doc.metadata["storyboard"]["timings"]["total"] = total
+    doc.metadata["storyboard"]["timings"]["total"] = round(
+        time.perf_counter() - t_all, 2)
     return doc
 
 
@@ -509,7 +521,7 @@ def _render_sheet(cells, frames: dict, sheet_no: int, sheets_n: int, offset: int
     small = _font(11)
     bold = _font(12, bold=True)
 
-    draw.text((gap, 4), "ATB STORYBOARD · 实验性", fill=ACCENT, font=small)
+    draw.text((gap, 4), "ATB STORYBOARD", fill=ACCENT, font=small)
     label = f"sheet {sheet_no}/{sheets_n}"
     draw.text((width - 8 - len(label) * 6, 4), label, fill=MUTED, font=small)
 
@@ -606,10 +618,10 @@ def _output_dir(path: str) -> str:
 def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
                    cell_w: int, cell_h: int, start: float, end: float, envelope,
                    budget: int, timings: Optional[dict] = None,
-                   workers: int = 1):
+                   workers: int = 1, cell_lines: Optional[List[List[str]]] = None):
     from PIL import Image
 
-    doc.blocks.append(Block("heading", "视频分镜（实验性）", level=1))
+    doc.blocks.append(Block("heading", "视频分镜", level=1))
     doc.blocks.append(Block("paragraph",
                             f"{_tc(start)}–{_tc(end)} 共 {len(cells)} 格，"
                             f"检测到 {len(cuts)} 个切点，输出 {len(sheet_paths)} 张宫格图。"
@@ -626,17 +638,18 @@ def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
     rows = []
     for i, (a, b) in enumerate(cells, 1):
         item = frames.get(i - 1)
+        line = " / ".join(cell_lines[i - 1][:2]) if cell_lines and i <= len(cell_lines) else ""
         rows.append([i, _tc(a), _tc(b),
                      f"{item[2]}s" if item else "-",
-                     f"{item[0]:.0f}" if item else "-"])
+                     f"{item[0]:.0f}" if item else "-",
+                     line[:80]])
     if rows:
         doc.blocks.append(Block("table", "", meta={
-            "header": ["格", "开始", "结束", "取帧时间", "清晰度"],
+            "header": ["格", "开始", "结束", "取帧时间", "清晰度", "台词"],
             "rows": rows[:100],
         }))
 
     doc.metadata["storyboard"] = {
-        "experimental": True,
         "cells": len(cells),
         "cuts": len(cuts),
         "sheets": sheet_paths,
@@ -644,17 +657,73 @@ def _fill_document(doc: Document, info: dict, cells, frames, cuts, sheet_paths,
         "budget": budget,
         "tokens_estimate": tokens,
         "has_audio": envelope is not None,
+        "has_subtitles": bool(cell_lines),
         "cell_table": [
-            {"index": i, "start": round(a, 2), "end": round(b, 2)}
+            {"index": i, "start": round(a, 2), "end": round(b, 2),
+             "lines": (cell_lines[i - 1] if cell_lines and i <= len(cell_lines) else [])}
             for i, (a, b) in enumerate(cells, 1)
         ],
         "upstream": "https://github.com/SAOS-3624/dsh-video-storyboard",
         "timings": timings or {},
         "workers": workers,
     }
-    doc.warnings.append("⚠ 实验性功能：分镜参数与输出结构可能变化")
-    doc.warnings.append("本实现不含 ASR/台词转写；音频仅以包络形式呈现")
+    doc.warnings.append("分镜为启发式结果：切点与格位可能与人工判断略有偏差")
+    if not cell_lines:
+        doc.warnings.append("未提供字幕；如需台词对齐，可用 --subs 传入 srt/vtt")
     if envelope is None:
         doc.warnings.append("未检测到音轨，分镜图底部无音频包络")
     if len(sheet_paths) > 1:
         doc.warnings.append("多图分镜会按张数累计 token，注意上下文预算")
+
+
+# ── 字幕 ─────────────────────────────────────────────────────
+_TS_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})")
+
+
+def _find_subtitle(video_path: str) -> Optional[str]:
+    stem = os.path.splitext(video_path)[0]
+    for ext in (".srt", ".vtt", ".SRT", ".VTT"):
+        cand = stem + ext
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def _ts_seconds(s: Optional[str]) -> float:
+    if not s:
+        return 0.0
+    m = _TS_RE.search(s)
+    if not m:
+        return 0.0
+    h, mi, sec, ms = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(sec) + int(ms.ljust(3, "0")) / 1000.0
+
+
+def _load_subtitles(sub_path: str) -> List[Tuple[float, float, str]]:
+    """复用 SubtitleReader 解析 srt/vtt，返回 (开始, 结束, 文本)。"""
+    from . import dispatch
+
+    doc = dispatch.read_file(sub_path)
+    cues: List[Tuple[float, float, str]] = []
+    for b in doc.blocks:
+        if b.type != "paragraph" or not b.text.strip():
+            continue
+        a = b.meta.get("start")
+        e = b.meta.get("end")
+        if not a:
+            continue
+        start = _ts_seconds(a)
+        end = _ts_seconds(e) if e else start + 2.0
+        if end < start:
+            end = start + 2.0
+        cues.append((start, end, b.text.strip()))
+    return cues
+
+
+def _attach_lines(cues, cells) -> List[List[str]]:
+    """把字幕按时间落进格位；每格最多保留 4 行，避免长片文本爆炸。"""
+    out: List[List[str]] = []
+    for a, b in cells:
+        lines = [t for s, e, t in cues if e > a and s < b]
+        out.append(lines[:4])
+    return out

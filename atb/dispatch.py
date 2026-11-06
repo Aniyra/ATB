@@ -22,7 +22,7 @@ def read_file(path: str, options: Optional[ReadOptions] = None,
         read_file_guard(path)
         det = detect(path, force_format)
         if det.format == "video" and opts.storyboard:
-            from .experimental.storyboard import build_storyboard
+            from .storyboard import build_storyboard
             doc = build_storyboard(path, det, opts)
             doc.mime = det.mime
             return doc

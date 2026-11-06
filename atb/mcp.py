@@ -5,7 +5,8 @@
   1. 换行分隔的 JSON（MCP stdio 官方行为）
   2. LSP 风格 `Content-Length: N\\r\\n\\r\\n{json}`
 
-提供工具：atb_read_file / atb_read_video / atb_video_storyboard / atb_video_guide /
+提供工具：atb_read_file / atb_read_video / atb_video_storyboard / atb_video_zoom /
+atb_video_guide / atb_query_quota / atb_compress_history / atb_computer_use /
 atb_extract_text / atb_file_info / atb_scan_directory / atb_search_text /
 atb_read_batch / atb_list_formats。
 """
@@ -17,12 +18,12 @@ import sys
 from typing import Dict, List, Optional
 
 import config
-from . import dispatch
+from . import dispatch, history, quota
 from .detect import EXT_MAP, FORMAT_MIME, ZIP_FAMILY
 from .errors import AtbError
 from .models import ReadOptions
 from .readers import READERS
-from .readers.video import fmt_time, frames_as_mcp_images
+from .readers.video import export_zoom, fmt_time, frames_as_mcp_images
 from .scanner import scan_directory
 
 SERVER_NAME = "atb"
@@ -80,13 +81,13 @@ TOOLS: List[dict] = [
     {
         "name": "atb_video_storyboard",
         "description": (
-            "【实验性】场景分镜：把整段视频压成一张可寻址的宫格图（编号 + 时间码 + 音频包络），"
+            "场景分镜：把整段视频压成一张可寻址的宫格图（编号 + 时间码 + 音频包络），"
             "以 MCP image content 回传。相比逐帧方案更省 token：一张 1.2M 像素的图约 1600 tokens，"
             "即可覆盖全片；格位按剪辑密度分配，快切区获得更多格。"
             "\n\n参数：cells 格数（默认按时长/密度自动，上限 64）、sheets 张数（默认 1）、"
-            "budget 单张像素预算（默认 1200000）、start/end 时间窗。"
-            "\n\n⚠ 实验性：算法与输出结构可能变化；本实现不含 ASR/台词转写。"
-            "若模型不具备原生图像输入能力，必须告知用户无法查看画面，不要臆测内容。"
+            "budget 单张像素预算（默认 1200000）、start/end 时间窗、subs 字幕文件。"
+            "若视频旁有同名 .srt/.vtt 会自动对齐台词；也可显式传 subs。"
+            "\n\n若模型不具备原生图像输入能力，必须告知用户无法查看画面，不要臆测内容。"
         ),
         "inputSchema": {
             "type": "object",
@@ -97,10 +98,110 @@ TOOLS: List[dict] = [
                 "budget": {"type": "integer", "description": "单张图像素预算，默认 1200000"},
                 "start": {"type": "number", "description": "起始秒"},
                 "end": {"type": "number", "description": "结束秒"},
+                "subs": {"type": "string", "description": "字幕文件路径（srt/vtt），可选"},
             },
             "required": ["path"],
         },
     },
+    {
+        "name": "atb_video_zoom",
+        "description": (
+            "取视频某一时刻的全分辨率画面，可按归一化区域裁剪放大，用于看清分镜小格里的"
+            "文字、接口、图表细节。返回一张 image content。先用 atb_video_storyboard 定位格子，"
+            "再用本工具放大该格时间点。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "视频文件绝对路径"},
+                "time": {"type": "number", "description": "时刻（秒）"},
+                "box": {
+                    "type": "array", "items": {"type": "number"},
+                    "description": "归一化区域 [x,y,w,h]，取值 0-1；省略为整帧",
+                },
+                "width": {"type": "integer", "description": "输出宽度，默认 1600（128-3840）"},
+            },
+            "required": ["path", "time"],
+        },
+    },
+    {
+        "name": "atb_query_quota",
+        "description": (
+            "查询 AI API 余额/额度（可选功能）。支持 DeepSeek / Moonshot / SiliconFlow / OpenRouter；"
+            "密钥从环境变量或 ~/.atb/config.json 读取。未配置时返回配置指引，不要把它当成错误。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string",
+                             "description": "deepseek / moonshot / siliconflow / openrouter；省略查全部"},
+            },
+        },
+    },
+    {
+        "name": "atb_compress_history",
+        "description": (
+            "压缩长对话历史，输出可续接的结构化摘要（确定性抽取，不调用模型）。"
+            "支持 json（messages 数组）/ jsonl（每行一条）/ markdown / 纯文本对话记录。"
+            "产物包含：目标与决策、关键文件/命令/错误码、早期对话单行摘要、最近若干轮原文、"
+            "以及续接提示。适合上下文将满或需要交接给另一个 Agent 时使用。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "对话存档路径"},
+                "target_tokens": {"type": "integer",
+                                  "description": "目标 token 预算，默认 6000（下限 600）"},
+                "keep_recent": {"type": "integer",
+                                "description": "保留最近多少条原文，默认 8"},
+                "max_chars": {"type": "integer",
+                              "description": "返回文本最大字符数，默认 40000"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "atb_computer_use",
+        "description": (
+            "实验性：操作 Windows 桌面应用（复刻 Trae Computer Use 的基础能力）。"
+            "动作：available / list / state / launch / click / scroll / drag / type / key / "
+            "select / set_value / action / ground。"
+            "\n\n使用顺序建议：list 找 app_id → state 看元素树 → ground 定位 → click/type。"
+            "element_id 只在同一窗口当前状态下有效，界面变化后要重新 state。"
+            "\n\n⚠ 实验性且仅支持 Windows，不保证在所有应用上可用；失败时如实告知用户，"
+            "不要反复盲试。执行点击/输入/启动等有副作用的操作前，先向用户确认目标应用与意图；"
+            "每完成一步用一句话说明做了什么。"
+            "\n\n缺少 uiautomation 时元素树退化为子窗口枚举，此时请用截图 + 坐标操作。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["available", "list", "state", "launch", "click",
+                                    "scroll", "drag", "type", "key", "select",
+                                    "set_value", "action", "ground"]},
+                "app": {"type": "string",
+                        "description": "app_id / 进程名 / 标题片段 / hwnd:123 / pid:123"},
+                "x": {"type": "integer", "description": "click 屏幕 X"},
+                "y": {"type": "integer", "description": "click 屏幕 Y"},
+                "x1": {"type": "integer"}, "y1": {"type": "integer"},
+                "x2": {"type": "integer"}, "y2": {"type": "integer"},
+                "element_id": {"type": "string", "description": "state 返回的元素编号"},
+                "text": {"type": "string", "description": "type 输入的文字 / ground 查找的文字"},
+                "keys": {"type": "string", "description": "按键组合，如 ctrl+s"},
+                "value": {"type": "string", "description": "set_value 的值"},
+                "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                "amount": {"type": "integer", "description": "滚动格数，默认 3"},
+                "depth": {"type": "integer", "description": "元素树深度，默认 3"},
+                "max_nodes": {"type": "integer", "description": "元素上限，默认 120"},
+                "screenshot": {"type": "boolean", "description": "state 时附带回传截图路径"},
+                "limit": {"type": "integer", "description": "list 返回窗口数，默认 50"},
+                "wait": {"type": "number", "description": "launch 等待窗口秒数，默认 8"},
+            },
+            "required": ["action"],
+        },
+    },
+
     {
         "name": "atb_video_guide",
         "description": "返回视频读取的预算指南：单帧/整包 MB 建议、token 计算公式、不同上下文窗口的帧数上限、"
@@ -255,8 +356,18 @@ class McpServer:
                             "原生图像输入能力——若你不支持图像内容，必须告知用户，不要臆测画面。"
                             "图片 token 建议不超过上下文窗口的 25%，长视频用 start/end 分段读取；"
                             "参数不确定时先调用 atb_video_guide 查看预算指南。"
-                            "\n\n【实验性】atb_video_storyboard 可把整段视频压成一张分镜宫格图，"
-                            "token 成本远低于逐帧；适合先建立全片概览，再对关键段用 atb_read_video 细看。"
+                            "\n\natb_video_storyboard 可把整段视频压成一张分镜宫格图，"
+                            "token 成本远低于逐帧；适合先建立全片概览，再对关键段用 atb_read_video 细看，"
+                            "或用 atb_video_zoom 放大某个时间点的局部细节。"
+                            "若视频旁有同名 .srt/.vtt 字幕，分镜会自动对齐台词。"
+                            "\n\n可选：atb_query_quota 查询 AI API 余额（需用户自行配置密钥，未配置时按指引说明即可）。"
+                            "\n\n上下文将满或需要交接时，可用 atb_compress_history 把长对话压成"
+                            "可续接摘要（确定性抽取，不调用模型）。"
+                            "\n\n实验性：atb_computer_use 可操作 Windows 桌面应用（仅 Windows，"
+                            "不保证兼容）。有副作用的操作先征得用户同意，失败不要反复盲试。"
+                            "\n\n【行为约定】禁止闷头干：动手前先说明要做什么；每完成一个小步骤，"
+                            "用一句话给出结论；每完成一个大阶段，用一段话总结结果、遗留问题与下一步。"
+                            "不确定时先向用户提问，不要臆测缺失信息。"
                         ),
                     })
                 elif method == "ping":
@@ -320,6 +431,14 @@ class McpServer:
             return _video_payload(args)
         if name == "atb_video_storyboard":
             return _storyboard_payload(args)
+        if name == "atb_video_zoom":
+            return _zoom_payload(args)
+        if name == "atb_query_quota":
+            return _quota_payload(args)
+        if name == "atb_compress_history":
+            return _history_payload(args)
+        if name == "atb_computer_use":
+            return _computer_payload(args)
         if name == "atb_video_guide":
             return VIDEO_GUIDE
         if name == "atb_extract_text":
@@ -450,7 +569,7 @@ def _video_payload(args: dict):
 
 
 def _storyboard_payload(args: dict):
-    """【实验性】返回 MCP content：分镜摘要 + 宫格图。"""
+    """返回 MCP content：分镜摘要 + 台词 + 宫格图。"""
     opts = ReadOptions(
         storyboard=True,
         cells=args.get("cells"),
@@ -458,13 +577,14 @@ def _storyboard_payload(args: dict):
         storyboard_budget=int(args.get("budget") or 1_200_000),
         start=args.get("start"),
         end=args.get("end"),
+        subtitles=args.get("subs"),
     )
     doc = dispatch.read_file(args["path"], opts)
     if doc.format != "video":
         return (f"该文件被识别为 `{doc.format}`，不是视频。请改用 atb_read_file。")
 
     sb = doc.metadata.get("storyboard") or {}
-    lines = ["# 视频分镜（实验性）", ""]
+    lines = ["# 视频分镜", ""]
     lines.append(f"- 时长：{doc.metadata.get('duration')}s；分辨率："
                  f"{doc.metadata.get('width')}×{doc.metadata.get('height')}；"
                  f"格数：{sb.get('cells')}；切点：{sb.get('cuts')}；图：{len(sb.get('sheets', []))} 张")
@@ -475,10 +595,17 @@ def _storyboard_payload(args: dict):
     if timings:
         lines.append(f"- 耗时：{timings.get('total')}s"
                      f"（切点 {timings.get('cuts')}s / 取帧 {timings.get('grab')}s）")
+    if sb.get("has_subtitles"):
+        lines.append("- 已对齐字幕台词（见各格 lines）")
     lines.append("")
     lines.append("## 格子时间轴")
     for c in (sb.get("cell_table") or [])[:64]:
-        lines.append(f"- 格 {c['index']}：{fmt_time(c['start'])}–{fmt_time(c['end'])}")
+        row = f"- 格 {c['index']}：{fmt_time(c['start'])}–{fmt_time(c['end'])}"
+        if c.get("lines"):
+            row += "｜" + " / ".join(c["lines"][:2])
+            if len(c["lines"]) > 2:
+                row += f"（+{len(c['lines']) - 2} 行）"
+        lines.append(row)
     if doc.warnings:
         lines.append("")
         lines.append("## 提示")
@@ -502,6 +629,99 @@ def _storyboard_payload(args: dict):
             "mimeType": "image/jpeg",
         })
     return content
+
+
+def _zoom_payload(args: dict):
+    """返回一张全分辨率局部画面。"""
+    box = args.get("box")
+    if box is not None:
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            raise AtbError("ATB-E10002", "box 需为 [x, y, w, h] 四个 0-1 数字")
+        box = [float(v) for v in box]
+    result = export_zoom(args["path"], float(args["time"]), box,
+                         int(args.get("width") or 1600))
+    lines = [
+        "# 视频局部画面",
+        "",
+        f"- 时刻：{result['time']}s",
+        f"- 源尺寸：{result['source_size'][0]}×{result['source_size'][1]}；"
+        f"区域：{result['box']}",
+        f"- 输出：{result['width']}×{result['height']}；"
+        f"{result['bytes'] / 1024:.0f} KB；约 {result['tokens_estimate']} tokens",
+        f"- 文件：{result['path']}",
+    ]
+    content = [{"type": "text", "text": "\n".join(lines)}]
+    try:
+        with open(result["path"], "rb") as fh:
+            data = fh.read()
+        content.append({
+            "type": "image",
+            "data": base64.b64encode(data).decode("ascii"),
+            "mimeType": "image/jpeg",
+        })
+    except OSError:
+        pass
+    return content
+
+
+def _quota_payload(args: dict):
+    provider = args.get("provider")
+    if provider and provider not in quota.PROVIDERS:
+        return (f"未知提供商 `{provider}`；可选：{', '.join(quota.PROVIDERS)}。"
+                f"如需配置密钥，请在用户本机运行 `atb quota --set {provider}=sk-...`。")
+    results = quota.query_all([provider] if provider else None)
+    lines = ["# API 额度", ""]
+    lines.append("| 提供商 | 余额 | 货币 | 来源 | 状态 |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for r in results:
+        status = "OK" if r.get("ok") else (r.get("error") or "未配置")
+        lines.append(f"| {r.get('label', r['provider'])} | "
+                     f"{r.get('balance', '-') if r.get('ok') else '-'} | "
+                     f"{r.get('currency', '-') if r.get('ok') else '-'} | "
+                     f"{r.get('source') or '-'} | {status} |")
+    if not any(r.get("configured") for r in results):
+        lines += [
+            "",
+            "## 如何配置（可选）",
+            f"- 环境变量：{', '.join(p['env'] for p in quota.PROVIDERS.values())}",
+            f"- 配置文件：{quota.CONFIG_PATH}",
+            "- 或运行 `atb quota --init` 生成模板，再填入 api_key",
+            "- 也可 `atb quota --set deepseek=sk-...` 直接写入",
+        ]
+    return "\n".join(lines)
+
+
+def _history_payload(args: dict):
+    result = history.compress_file(
+        args["path"],
+        target_tokens=int(args.get("target_tokens") or 6000),
+        keep_recent=int(args.get("keep_recent") or 8),
+    )
+    markdown = result["markdown"]
+    limit = int(args.get("max_chars") or 40000)
+    if len(markdown) > limit:
+        markdown = markdown[:limit] + f"\n\n…（已按 max_chars={limit} 截断）"
+    stats = {k: v for k, v in result.items() if k != "markdown"}
+    return (f"```json\n{json.dumps(stats, ensure_ascii=False, indent=2)}\n```\n\n" + markdown)
+
+
+_COMPUTER_KEYS = ("app", "x", "y", "x1", "y1", "x2", "y2", "element_id", "text",
+                  "keys", "value", "direction", "amount", "depth", "max_nodes",
+                  "screenshot", "limit", "wait", "args")
+
+
+def _computer_payload(args: dict):
+    from .experimental import computer
+
+    action = str(args.get("action") or "").strip()
+    if not action:
+        raise AtbError("ATB-E10002", "缺少 action")
+    params = {k: args.get(k) for k in _COMPUTER_KEYS if args.get(k) is not None}
+    result = computer.dispatch(action, params)
+    if action == "list" and isinstance(result.get("apps"), list):
+        result = dict(result)
+        result["apps"] = result["apps"][:int(args.get("limit") or 50)]
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 
 def _opts_from(args: dict) -> ReadOptions:

@@ -64,11 +64,12 @@ class ReadOptions:
     frame_dir: Optional[str] = None    # 帧输出目录
     sampling: str = "uniform"          # uniform / keyframe
 
-    # ── 实验性：场景分镜 ──
+    # ── 场景分镜 ──
     storyboard: bool = False           # 改用分镜图（一张宫格图）
     cells: Optional[int] = None        # 格数；None = 按时长/剪辑密度自动
     sheets: int = 1                    # 分几张图
     storyboard_budget: int = 1_200_000  # 单张图像素预算
+    subtitles: Optional[str] = None     # 字幕文件（srt/vtt），None = 自动查找同名文件
 
     # ── 运行期（不参与序列化）──
     progress: Optional[object] = None  # 进度回调（CLI 传入，MCP 为 None）

@@ -15,6 +15,7 @@ import os
 from typing import List, Optional
 
 import config
+from ..errors import AtbError
 from ..models import Block, Document, ReadOptions
 from .base import BaseReader, new_document
 
@@ -323,6 +324,76 @@ def _add_template_stream(dst, src_stream):
     if fn is not None:
         return fn(src_stream)
     return dst.add_stream(template=src_stream)
+
+
+# ── 全分辨率缩放查看（对应上游的 video_zoom）────────────────
+def export_zoom(path: str, at: float, box=None, width: int = 1600,
+                quality: int = 88) -> dict:
+    """取指定时刻的一帧，按归一化区域裁剪并放大保存。
+
+    box=(x, y, w, h)，取值 0–1；None 表示整帧。用于看清分镜小格里的
+    文字/接口细节——先看宫格定位，再对局部放大。
+    """
+    import av
+    from PIL import Image
+
+    info = probe_video(path) or {}
+    duration = float(info.get("duration") or 0)
+    at = max(0.0, float(at))
+    if duration and at > duration + 0.05:
+        raise AtbError("ATB-E00003", f"--at {at}s 超出视频时长 {duration:.2f}s")
+
+    frame = None
+    with av.open(path) as c:
+        stream = c.streams.video[0]
+        stream.thread_type = "AUTO"
+        for f in c.decode(stream):
+            t = _frame_time(f, stream)
+            if t is None:
+                continue
+            if t + 0.001 >= at:
+                frame = f
+                break
+    if frame is None:
+        raise AtbError("ATB-E00003", f"未取到 {at}s 的画面")
+
+    img = frame.to_image().convert("RGB")
+    full_w, full_h = img.size
+    if box:
+        x, y, w, h = [float(v) for v in box]
+        x = min(max(x, 0.0), 1.0)
+        y = min(max(y, 0.0), 1.0)
+        w = min(max(w, 0.01), 1.0 - x)
+        h = min(max(h, 0.01), 1.0 - y)
+        img = img.crop((int(x * full_w), int(y * full_h),
+                        int((x + w) * full_w), int((y + h) * full_h)))
+
+    width = max(128, min(int(width or 1600), 3840))
+    if img.width != width:
+        img = img.resize((width, max(1, int(img.height * width / img.width))),
+                         Image.LANCZOS)
+    out_dir = _zoom_dir(path)
+    fp = os.path.join(out_dir, f"zoom_t{at:08.2f}.jpg")
+    img.save(fp, "JPEG", quality=max(50, min(int(quality), 95)), optimize=True)
+    return {
+        "path": fp,
+        "time": round(at, 2),
+        "source_size": [full_w, full_h],
+        "box": list(box) if box else [0, 0, 1, 1],
+        "width": img.width,
+        "height": img.height,
+        "bytes": os.path.getsize(fp),
+        "tokens_estimate": int(round(img.width * img.height / 750)),
+    }
+
+
+def _zoom_dir(path: str) -> str:
+    stem = os.path.splitext(os.path.basename(path))[0]
+    key = f"{os.path.abspath(path)}|{os.path.getmtime(path)}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+    out = os.path.join(config.REPORT_DIR, "zoom", f"{stem}_{digest}")
+    os.makedirs(out, exist_ok=True)
+    return out
 
 
 def _audio_exts(path: str):

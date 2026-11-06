@@ -13,4 +13,4 @@ from .detect import detect  # noqa: F401
 from .dispatch import read_file, extract_text, file_info  # noqa: F401
 from .scanner import scan_directory  # noqa: F401
 
-__version__ = "1.0.0"
+from config import APP_VERSION as __version__  # noqa: F401

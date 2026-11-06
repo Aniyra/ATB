@@ -8,6 +8,12 @@
     python main.py scan <目录> [--no-recursive] [--json]
     python main.py formats [--json]
     python main.py doctor [--json]
+    python main.py video <视频> [--frames N] [--start S] [--end S]
+    python main.py storyboard <视频> [--cells N] [--subs 字幕.srt]
+    python main.py zoom <视频> --at 秒 [--box x,y,w,h]
+    python main.py quota [--set deepseek=KEY] [--init] [--show]
+    python main.py ctx <对话存档> [--target-tokens N]
+    python main.py cu <动作> [--app 窗口] [--json]
     python main.py mcp                 # 启动 stdio MCP Server
     python main.py err [编号|关键词]    # 错误码速查
     python main.py                     # 交互菜单
@@ -24,13 +30,14 @@ import time
 import traceback
 
 import config
-from atb import dispatch, output, ui
+from atb import dispatch, history, output, quota, ui
 from atb.errors import (ERRORS, AtbError, all_errors, list_categories, log_error,
                         lookup, match_category, normalize_code, search_errors)
 from atb.mcp import format_matrix, main as mcp_main
 from atb.models import ReadOptions, human_size
 from atb.progress import NULL as NULL_PROGRESS
 from atb.progress import make_progress
+from atb.readers.video import export_zoom
 from atb.scanner import scan_directory
 
 _PROGRESS = NULL_PROGRESS
@@ -45,7 +52,10 @@ MENU = {
     "7": ("启动 MCP Server（stdio）", "mcp"),
     "8": ("错误码速查", "err"),
     "9": ("视频抽帧（供视觉模型理解）", "video"),
-    "10": ("视频分镜图（实验性）", "storyboard"),
+    "10": ("视频分镜图（一张图看全片）", "storyboard"),
+    "11": ("查询 API 额度（可选）", "quota"),
+    "12": ("压缩历史对话（上下文续接）", "ctx"),
+    "13": ("电脑操作（实验性 · 仅 Windows）", "cu"),
     "0": ("退出", "exit"),
 }
 
@@ -135,11 +145,64 @@ def build_parser() -> argparse.ArgumentParser:
                         default=1_200_000, help="单张图像素预算（默认 1200000）")
         sp.add_argument("--start", type=float, help="起始秒")
         sp.add_argument("--end", type=float, help="结束秒")
+        sp.add_argument("--subs", dest="subtitles",
+                        help="字幕文件（srt/vtt）；默认查找视频同名文件")
         _add_runtime_opts(sp)
 
-    sp = sub.add_parser("storyboard", help="【实验性】视频场景分镜图（一张图看全片）")
+    sp = sub.add_parser("storyboard", help="视频场景分镜图（一张图看全片）")
     sp.add_argument("path")
     _add_storyboard_opts(sp)
+    sp.add_argument("--json", action="store_true")
+
+    sp = sub.add_parser("zoom", help="按时刻/区域取全分辨率画面（看清细节）")
+    sp.add_argument("path")
+    sp.add_argument("--at", type=float, required=True, help="时刻（秒）")
+    sp.add_argument("--box", help="归一化区域 x,y,w,h（0-1），省略为整帧")
+    sp.add_argument("--width", type=int, default=1600, help="输出宽度（默认 1600）")
+    sp.add_argument("--quality", type=int, default=88, help="JPEG 质量（默认 88）")
+    sp.add_argument("--json", action="store_true")
+
+    sp = sub.add_parser("quota", help="查询 API 额度（可选）")
+    sp.add_argument("--provider", help="只查某个提供商：" + "/".join(quota.PROVIDERS))
+    sp.add_argument("--set", metavar="PROVIDER=KEY", help="写入密钥到 ~/.atb/config.json")
+    sp.add_argument("--unset", metavar="PROVIDER", help="删除已保存的密钥")
+    sp.add_argument("--init", action="store_true", help="生成配置文件模板")
+    sp.add_argument("--show", action="store_true", help="查看已配置的密钥（脱敏）")
+    sp.add_argument("--timeout", type=int, default=12, help="请求超时秒数")
+    sp.add_argument("--json", action="store_true")
+
+    sp = sub.add_parser("ctx", help="压缩历史对话，生成可续接摘要")
+    sp.add_argument("path", help="对话存档：json / jsonl / markdown / 纯文本")
+    sp.add_argument("--target-tokens", type=int, default=6000, dest="target_tokens",
+                    help="目标 token 预算（默认 6000）")
+    sp.add_argument("--keep-recent", type=int, default=8, dest="keep_recent",
+                    help="保留最近多少条原文（默认 8）")
+    sp.add_argument("--out", help="把摘要写入文件")
+    sp.add_argument("--json", action="store_true")
+
+    sp = sub.add_parser("cu", help="电脑操作（实验性，仅 Windows）")
+    sp.add_argument("action", nargs="?", default="available",
+                    choices=["available", "list", "state", "launch", "click", "scroll",
+                             "drag", "type", "key", "select", "set_value", "action",
+                             "ground"])
+    sp.add_argument("--app", help="app_id / 进程名 / 标题片段 / hwnd:123 / pid:123")
+    sp.add_argument("--x", type=int)
+    sp.add_argument("--y", type=int)
+    sp.add_argument("--x1", type=int)
+    sp.add_argument("--y1", type=int)
+    sp.add_argument("--x2", type=int)
+    sp.add_argument("--y2", type=int)
+    sp.add_argument("--element-id", dest="element_id")
+    sp.add_argument("--text", help="type 要输入的文字 / ground 要查找的文字")
+    sp.add_argument("--keys", help="按键组合，如 ctrl+s")
+    sp.add_argument("--value", help="set_value 的值")
+    sp.add_argument("--direction", default="down", help="up / down / left / right")
+    sp.add_argument("--amount", type=int, default=3, help="滚动格数")
+    sp.add_argument("--depth", type=int, default=3, help="元素树深度")
+    sp.add_argument("--max-nodes", type=int, default=120, dest="max_nodes")
+    sp.add_argument("--screenshot", action="store_true", help="同时截图")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--wait", type=float, default=8, help="launch 等待窗口秒数")
     sp.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("scan", help="扫描目录")
@@ -185,6 +248,7 @@ def opts_from_args(a) -> ReadOptions:
         include_audio=bool(getattr(a, "include_audio", False)),
         frame_dir=getattr(a, "frame_dir", None),
         sampling="keyframe" if getattr(a, "scene", False) else "uniform",
+        subtitles=getattr(a, "subtitles", None),
         progress=_PROGRESS,
         threads=getattr(a, "threads", 0),
     )
@@ -273,6 +337,7 @@ def cmd_storyboard(a) -> int:
         storyboard_budget=a.storyboard_budget,
         start=a.start,
         end=a.end,
+        subtitles=getattr(a, "subtitles", None),
         progress=_PROGRESS,
         threads=getattr(a, "threads", 0),
     )
@@ -285,13 +350,162 @@ def cmd_storyboard(a) -> int:
     if sb:
         t = sb.get("timings") or {}
         print()
-        ui.info(f"【实验性】{sb['cells']} 格 · {sb['cuts']} 个切点 · "
+        ui.info(f"{sb['cells']} 格 · {sb['cuts']} 个切点 · "
                 f"{len(sb['sheets'])} 张图 · 约 {sb['tokens_estimate']} tokens · "
                 f"耗时 {t.get('total', '?')}s（切点 {t.get('cuts', '?')}s / "
                 f"取帧 {t.get('grab', '?')}s）")
         for p in sb["sheets"]:
             print("  " + p)
     ui.note(f"完成 · {time.perf_counter() - t0:.2f}s · 线程 {sb.get('workers', 1)}")
+    return 0
+
+
+def cmd_zoom(a) -> int:
+    box = None
+    if a.box:
+        try:
+            box = [float(x) for x in a.box.split(",")]
+        except ValueError:
+            raise AtbError("ATB-E00003", f"--box 需为 x,y,w,h 四个 0-1 数字：{a.box}")
+        if len(box) != 4:
+            raise AtbError("ATB-E00003", f"--box 需为 4 个数字：{a.box}")
+    r = export_zoom(a.path, a.at, box, a.width, a.quality)
+    if a.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+    ui.info(f"{r['time']}s 的画面 · {r['width']}×{r['height']} · "
+            f"约 {r['tokens_estimate']} tokens")
+    print("  " + r["path"])
+    return 0
+
+
+def cmd_quota(a) -> int:
+    if a.init:
+        if os.path.exists(quota.CONFIG_PATH):
+            ui.info(f"配置文件已存在：{quota.CONFIG_PATH}")
+        else:
+            os.makedirs(os.path.dirname(quota.CONFIG_PATH), exist_ok=True)
+            with open(quota.CONFIG_PATH, "w", encoding="utf-8") as f:
+                f.write(quota.config_template())
+            ui.info(f"已生成模板：{quota.CONFIG_PATH}")
+        ui.note("填入 api_key 后运行 `atb quota`；也可用 --set deepseek=sk-... 直接写入")
+        return 0
+
+    if a.set:
+        if "=" not in a.set:
+            raise AtbError("ATB-E00003", "--set 格式为 PROVIDER=KEY")
+        name, key = (s.strip() for s in a.set.split("=", 1))
+        if name not in quota.PROVIDERS:
+            raise AtbError("ATB-E00003",
+                           f"未知提供商 {name}；可选：{', '.join(quota.PROVIDERS)}")
+        if not key:
+            raise AtbError("ATB-E00003", "密钥不能为空")
+        path = quota.set_key(name, key)
+        ui.info(f"已保存 {name} 密钥（{quota.mask(key)}）→ {path}")
+        return 0
+
+    if a.unset:
+        if a.unset not in quota.PROVIDERS:
+            raise AtbError("ATB-E00003", f"未知提供商 {a.unset}")
+        quota.remove_key(a.unset)
+        ui.info(f"已删除 {a.unset} 的密钥")
+        return 0
+
+    if a.show:
+        names = [a.provider] if a.provider else list(quota.PROVIDERS)
+        rows = []
+        for n in names:
+            if n not in quota.PROVIDERS:
+                raise AtbError("ATB-E00003", f"未知提供商 {n}")
+            key, source = quota.get_key(n)
+            rows.append([n, quota.PROVIDERS[n]["label"], source or "-",
+                         quota.mask(key), quota.PROVIDERS[n]["env"]])
+        print(ui.table(["provider", "名称", "来源", "密钥", "环境变量"], rows))
+        print()
+        ui.note(f"配置文件：{quota.CONFIG_PATH}")
+        return 0
+
+    providers = [a.provider] if a.provider else None
+    if providers and providers[0] not in quota.PROVIDERS:
+        raise AtbError("ATB-E00003",
+                       f"未知提供商 {providers[0]}；可选：{', '.join(quota.PROVIDERS)}")
+    results = quota.query_all(providers, max(3, int(a.timeout)))
+    if a.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 0
+    header, rows = quota.format_rows(results)
+    print(ui.table(header, rows))
+    if not any(r.get("configured") for r in results):
+        print()
+        ui.note("尚未配置任何密钥：atb quota --init 生成模板，"
+                "或 atb quota --set deepseek=sk-...")
+    return 0
+
+
+def cmd_ctx(a) -> int:
+    result = history.compress_file(a.path, a.target_tokens, a.keep_recent)
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    _emit(result["markdown"], a.out)
+    ui.note(f"{result['messages']} 条消息 · {result['original_tokens']} → "
+            f"{result['compressed_tokens']} tokens "
+            f"（保留 {result['ratio'] * 100:.1f}%）")
+    return 0
+
+
+def cmd_cu(a) -> int:
+    from atb.experimental import computer
+
+    params = {
+        "app": a.app, "x": a.x, "y": a.y, "x1": a.x1, "y1": a.y1,
+        "x2": a.x2, "y2": a.y2, "element_id": a.element_id, "text": a.text,
+        "keys": a.keys, "value": a.value, "direction": a.direction,
+        "amount": a.amount, "depth": a.depth, "max_nodes": a.max_nodes,
+        "screenshot": a.screenshot or None, "limit": a.limit, "wait": a.wait,
+    }
+    result = computer.dispatch(a.action, {k: v for k, v in params.items() if v is not None})
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    if a.action == "list":
+        rows = [[w["app_id"], w["title"][:48], w["pid"],
+                 "×".join(str(v) for v in w["bounds"]) if w.get("bounds") else "-",
+                 "是" if w["foreground"] else ""] for w in result["apps"]]
+        print(ui.table(["app_id", "标题", "PID", "位置×尺寸", "前台"], rows))
+    elif a.action == "state":
+        app = result["app"]
+        print(ui.kv_block({
+            "应用": app["app_id"],
+            "标题": app["title"],
+            "窗口": app["hwnd"],
+            "区域": "×".join(str(v) for v in app["bounds"]),
+            "元素来源": result["source"],
+            "元素数": result["node_count"],
+        }))
+        rows = [[n["element_id"], n["type"], (n["name"] or "")[:40],
+                 "×".join(str(v) for v in n["bounds"]) if n.get("bounds") else "-"]
+                for n in result["nodes"][:40]]
+        if rows:
+            print()
+            print(ui.table(["element_id", "类型", "名称", "区域"], rows))
+        if result.get("screenshot"):
+            print()
+            ui.info(f"截图：{result['screenshot']['path']}")
+        if result.get("warning"):
+            ui.warn(result["warning"])
+    elif a.action == "available":
+        state = "可用" if result["ok"] else "不可用"
+        print(ui.kv_block({
+            "电脑控制": state,
+            "平台": result["platform"],
+            "UI 自动化": "已安装" if result["uiautomation"] else "未安装（子窗口降级）",
+            "截图": "可用" if result["screenshot"] else "不可用",
+            "说明": result["reason"] or "基础能力就绪",
+        }))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 
 
@@ -528,6 +742,28 @@ def _menu_action(action: str) -> None:
     if action == "err":
         cmd_err(argparse.Namespace(keyword=None, all=True, json=False))
         return
+    if action == "cu":
+        print(ui.paint("电脑操作（实验性，仅 Windows）：", ui.C.BOLD))
+        for line in (
+            "atb cu available              查看能力",
+            "atb cu list                   列出可见窗口",
+            "atb cu state --app <关键词>   查看元素树（--screenshot 截图）",
+            "atb cu click --app <关键词> --x 100 --y 200",
+            "atb cu type --app <关键词> --text \"你好\"",
+            "atb cu key --keys ctrl+s",
+            "atb cu ground --app <关键词> --text \"保存\"",
+            "atb cu launch --app \"C:\\Windows\\notepad.exe\"",
+        ):
+            print("  " + line)
+        return
+    if action == "ctx":
+        path = input(ui.paint("对话存档路径 > ", ui.C.GREEN)).strip().strip('"')
+        if not path:
+            ui.warn("未输入路径")
+            return
+        cmd_ctx(argparse.Namespace(path=path, target_tokens=6000,
+                                   keep_recent=8, out=None, json=False))
+        return
 
     path = input(ui.paint("路径 > ", ui.C.GREEN)).strip().strip('"')
     if not path:
@@ -549,7 +785,11 @@ def _menu_action(action: str) -> None:
     elif action == "storyboard":
         cmd_storyboard(argparse.Namespace(
             path=path, cells=None, sheets=1, storyboard_budget=1_200_000,
-            start=None, end=None, json=False, threads=0))
+            start=None, end=None, subtitles=None, json=False, threads=0))
+    elif action == "quota":
+        cmd_quota(argparse.Namespace(
+            provider=None, set=None, unset=None, init=False, show=False,
+            timeout=12, json=False))
     elif action == "scan":
         result = scan_directory(path)
         print(output.render_scan(result))
@@ -598,6 +838,11 @@ def _doctor() -> list:
         shutil.which("ffprobe") or "未安装 ffmpeg，音视频仅用 mutagen")
     add("可选 tesseract", bool(shutil.which("tesseract")),
         shutil.which("tesseract") or "未安装，不能对扫描件 OCR")
+    try:
+        import uiautomation as _uia  # noqa: F401
+        add("可选 uiautomation", True, "电脑控制元素树可用")
+    except Exception:
+        add("可选 uiautomation", False, "未安装，电脑控制退化为子窗口枚举（仅 Windows）")
 
     probe = os.path.join(config.REPORT_DIR, ".write_test")
     try:
@@ -648,7 +893,9 @@ def main(argv=None) -> int:
 
     handlers = {
         "read": cmd_read, "text": cmd_text, "info": cmd_info, "video": cmd_video,
-        "storyboard": cmd_storyboard, "scan": cmd_scan, "formats": cmd_formats,
+        "storyboard": cmd_storyboard, "zoom": cmd_zoom, "quota": cmd_quota,
+        "ctx": cmd_ctx, "cu": cmd_cu,
+        "scan": cmd_scan, "formats": cmd_formats,
         "doctor": cmd_doctor, "mcp": cmd_mcp, "err": cmd_err,
     }
     try:

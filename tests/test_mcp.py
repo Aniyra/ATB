@@ -58,6 +58,10 @@ class McpTest(unittest.TestCase):
         self.assertIn("atb_read_file", names)
         self.assertIn("atb_scan_directory", names)
         self.assertIn("atb_extract_text", names)
+        self.assertIn("atb_video_zoom", names)
+        self.assertIn("atb_query_quota", names)
+        self.assertIn("atb_compress_history", names)
+        self.assertIn("atb_computer_use", names)
 
     def test_tool_call_extract_text(self):
         msgs = self._base() + [
@@ -74,6 +78,34 @@ class McpTest(unittest.TestCase):
         self.assertEqual(payload["format"], "text")
         info = json.loads(res[5]["result"]["content"][0]["text"])
         self.assertEqual(info["format"], "text")
+
+    def test_tool_compress_history(self):
+        path = os.path.join(self.tmp.name, "h.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(6):
+                f.write(json.dumps({"role": "user" if i % 2 == 0 else "assistant",
+                                    "content": f"第 {i} 条，决定保留 ATB-E01001"},
+                                   ensure_ascii=False) + "\n")
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "atb_compress_history",
+                        "arguments": {"path": path, "target_tokens": 800}}},
+        ]
+        res = self._run(msgs)
+        text = res[7]["result"]["content"][0]["text"]
+        self.assertIn("历史对话压缩包", text)
+        self.assertIn("ATB-E01001", text)
+
+    @unittest.skipUnless(sys.platform == "win32", "电脑控制仅支持 Windows")
+    def test_tool_computer_available(self):
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+             "params": {"name": "atb_computer_use",
+                        "arguments": {"action": "available"}}},
+        ]
+        res = self._run(msgs)
+        payload = json.loads(res[8]["result"]["content"][0]["text"])
+        self.assertTrue(payload["ok"])
 
     def test_tool_error_is_reported_not_crashing(self):
         msgs = self._base() + [
