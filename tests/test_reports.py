@@ -73,6 +73,24 @@ class ReportsCleanupTest(unittest.TestCase):
         result = reports.cleanup(7, base_dir=os.path.join(self.base, "nope"))
         self.assertEqual(result["removed_files"], 0)
 
+    def test_auto_cleanup_skips_mcp(self):
+        """MCP 常驻进程启动时不自动删文件。"""
+        import config
+        from main import _auto_cleanup_reports
+
+        old_dir, old_ttl = config.REPORT_DIR, config.REPORT_TTL_DAYS
+        try:
+            config.REPORT_DIR = self.base
+            config.REPORT_TTL_DAYS = 7
+            old = self._touch("frames", "old.jpg", 30)
+            _auto_cleanup_reports("mcp")
+            self.assertTrue(os.path.exists(old))
+            _auto_cleanup_reports("read")
+            self.assertFalse(os.path.exists(old))
+        finally:
+            config.REPORT_DIR = old_dir
+            config.REPORT_TTL_DAYS = old_ttl
+
 
 if __name__ == "__main__":
     unittest.main()

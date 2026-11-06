@@ -95,7 +95,9 @@ def read_text_file(path: str, opts: ReadOptions,
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     if stats is not None:
-        stats["lines"] = text.count("\n") + 1 if text else 0
+        # 以换行结尾的文件不应多算一行（"a\nb\n" 是 2 行）
+        stats["lines"] = ((text.count("\n") + (0 if text.endswith("\n") else 1))
+                          if text else 0)
         stats["characters"] = len(text)
 
     if opts.max_chars and len(text) > opts.max_chars:

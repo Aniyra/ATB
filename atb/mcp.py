@@ -250,14 +250,17 @@ TOOLS: List[dict] = [
     {
         "name": "atb_search_text",
         "description": "在单个文件（任意格式）中搜索关键词，返回命中片段。"
-                       "total_hits 是全部命中数，hits 受 max_hits 限制。",
+                       "默认搜索全文；total_hits 是全部命中数，hits 受 max_hits 限制。"
+                       "大文件可用 max_chars 限制搜索范围，返回里的 note 会说明。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "query": {"type": "string"},
+                "query": {"type": "string", "description": "关键词，不能为空"},
                 "context": {"type": "integer", "default": 80},
                 "max_hits": {"type": "integer", "default": 20},
+                "max_chars": {"type": "integer",
+                              "description": "搜索范围字符上限；省略或 0 表示全文"},
             },
             "required": ["path", "query"],
         },
@@ -813,9 +816,13 @@ def _max_chars_arg(args: dict) -> int:
 def _search(args: dict) -> str:
     path = args["path"]
     query = args["query"]
+    if not query:
+        raise AtbError("ATB-E10002", "query 不能为空")
     context = int(args.get("context", 80))
     max_hits = int(args.get("max_hits", 20))
-    text = dispatch.extract_text(path)
+    raw_limit = args.get("max_chars")
+    limit = 0 if raw_limit is None else max(0, int(raw_limit))
+    text = dispatch.extract_text(path, ReadOptions(max_chars=limit))
     hits = []
     total = 0
     start = 0
@@ -831,11 +838,18 @@ def _search(args: dict) -> str:
                 "before": text[max(0, idx - context): idx],
                 "after": text[idx + len(query): idx + len(query) + context],
             })
-        start = idx + len(query)
-    return json.dumps({"path": path, "query": query, "hits": hits,
-                       "total_hits": total, "returned": len(hits),
-                       "truncated": total > len(hits)},
-                      ensure_ascii=False, indent=2)
+        start = idx + max(1, len(query))
+    truncated_scope = bool(limit and len(text) >= limit)
+    return json.dumps({
+        "path": path,
+        "query": query,
+        "hits": hits,
+        "total_hits": total,
+        "returned": len(hits),
+        "truncated": total > len(hits),
+        "searched_chars": len(text),
+        "note": f"仅搜索了前 {limit} 个字符" if truncated_scope else "",
+    }, ensure_ascii=False, indent=2)
 
 
 def format_matrix() -> dict:

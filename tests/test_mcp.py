@@ -194,6 +194,45 @@ class McpTest(unittest.TestCase):
         self.assertEqual(len(payload), 52)
         self.assertTrue(all(item["ok"] for item in payload))
 
+    def test_search_empty_query_is_rejected(self):
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 14, "method": "tools/call",
+             "params": {"name": "atb_search_text",
+                        "arguments": {"path": self.txt, "query": ""}}},
+        ]
+        res = self._run(msgs)
+        self.assertTrue(res[14]["result"]["isError"])
+        self.assertIn("ATB-E10002", res[14]["result"]["content"][0]["text"])
+
+    def test_search_covers_full_text(self):
+        path = os.path.join(self.tmp.name, "far.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("x" * 250_000 + "NEEDLE")
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 15, "method": "tools/call",
+             "params": {"name": "atb_search_text",
+                        "arguments": {"path": path, "query": "NEEDLE"}}},
+        ]
+        res = self._run(msgs)
+        payload = json.loads(res[15]["result"]["content"][0]["text"])
+        self.assertEqual(payload["total_hits"], 1)
+        self.assertGreater(payload["searched_chars"], 250_000)
+
+    def test_search_scope_note(self):
+        path = os.path.join(self.tmp.name, "scope.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("y" * 5_000 + "NEEDLE")
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 16, "method": "tools/call",
+             "params": {"name": "atb_search_text",
+                        "arguments": {"path": path, "query": "NEEDLE",
+                                      "max_chars": 1_000}}},
+        ]
+        res = self._run(msgs)
+        payload = json.loads(res[16]["result"]["content"][0]["text"])
+        self.assertEqual(payload["total_hits"], 0)
+        self.assertIn("仅搜索了前", payload["note"])
+
     def test_tool_error_is_reported_not_crashing(self):
         msgs = self._base() + [
             {"jsonrpc": "2.0", "id": 6, "method": "tools/call",

@@ -883,8 +883,13 @@ def _doctor() -> list:
 
 
 # ── 公共 ─────────────────────────────────────────────────────
-def _auto_cleanup_reports() -> None:
-    """按 TTL 静默清理 reports/ 下的自动产物；失败不影响主流程。"""
+def _auto_cleanup_reports(cmd: str = None) -> None:
+    """按 TTL 静默清理 reports/ 下的自动产物；失败不影响主流程。
+
+    常驻的 MCP Server 不自动清理：避免后台服务在无人值守时删文件。
+    """
+    if cmd == "mcp":
+        return
     ttl = getattr(config, "REPORT_TTL_DAYS", 0)
     if ttl <= 0:
         return
@@ -919,7 +924,7 @@ def main(argv=None) -> int:
     if getattr(args, "no_color", False):
         ui._COLOR["on"] = False
     _PROGRESS = make_progress(False if getattr(args, "no_progress", False) else None)
-    _auto_cleanup_reports()
+    _auto_cleanup_reports(args.cmd)
 
     if not args.cmd or args.cmd == "menu":
         return interactive()

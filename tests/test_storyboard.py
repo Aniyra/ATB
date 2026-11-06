@@ -6,14 +6,33 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config  # noqa: E402
 from atb.dispatch import read_file  # noqa: E402
 from atb.models import ReadOptions  # noqa: E402
+
+_REPORT_TMP = None
+_OLD_REPORT_DIR = None
+
+
+def setUpModule():
+    """分镜/宫格图写入临时目录，避免污染项目 reports/。"""
+    global _REPORT_TMP, _OLD_REPORT_DIR
+    _REPORT_TMP = tempfile.mkdtemp(prefix="atb_test_reports_")
+    _OLD_REPORT_DIR = config.REPORT_DIR
+    config.REPORT_DIR = _REPORT_TMP
+
+
+def tearDownModule():
+    config.REPORT_DIR = _OLD_REPORT_DIR
+    if _REPORT_TMP:
+        shutil.rmtree(_REPORT_TMP, ignore_errors=True)
 
 
 def has(module: str) -> bool:

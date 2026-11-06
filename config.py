@@ -6,7 +6,7 @@ import sys
 
 APP_NAME = "ATB (All Tool Box)"
 APP_SHORT = "ATB"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 APP_AUTHOR = "LFTAniyra"
 APP_DESC = "面向 AI Agent 的全格式文件读取工具箱"
 

@@ -333,6 +333,8 @@ python main.py reports --days 0
 - 保留天数可用环境变量调整：`ATB_REPORT_TTL_DAYS=14`；设为 `0` 关闭自动清理。
 - 只清理 `frames/` `storyboards/` `zoom/` `computer/` 四个目录，不影响 `atb_error_log.json`
   和其他文件；清理后自动删除变空的目录。
+- 常驻的 `atb mcp` 启动时**不会**自动清理（避免后台服务无人值守时删文件），
+  请手动执行 `python main.py reports` 或用系统计划任务定期清理。
 
 不带参数运行进入**交互菜单**：
 
@@ -342,7 +344,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ATB (All Tool Box)  v1.3.1                                               │
+│ ATB (All Tool Box)  v1.3.2                                               │
 │ 面向 AI Agent 的全格式文件读取工具箱                                      │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -600,7 +602,7 @@ ATB/
 │  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
 │  └─ experimental/
 │     └─ computer.py      【实验性】电脑控制：窗口/元素树/点击/输入（Win32，仅 Windows）
-├─ tests/                 单元测试（标准库 unittest，93 用例）
+├─ tests/                 单元测试（标准库 unittest，98 用例）
 ├─ reports/               运行期产物：帧/分镜/放大/截图/错误日志（默认 7 天 TTL）
 ├─ requirements.txt
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
@@ -626,7 +628,8 @@ python -m unittest discover -s tests -v
 MCP image content 回传）、视频分镜（切点检测、多图分格、时间窗、字幕对齐、局部放大、音频包络与导出、
 MCP 宫格图回传）、额度查询（配置读写、环境变量、脱敏、解析器）、历史对话压缩（json/jsonl/纯文本解析、
 去重、预算裁剪、MCP 回传）、电脑控制（按键解析、窗口枚举、错误码；不执行有副作用的操作）、
-reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文件不动）、
+MCP 搜索（全文命中、空 query 拒绝、范围提示）、
+reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文件不动、MCP 不自动清理）、
 进度组件（进度/ETA、spinner、禁用态）。
 
 ---

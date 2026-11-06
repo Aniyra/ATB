@@ -102,6 +102,13 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(info["format"], "text")
         self.assertEqual(len(info["sha256"]), 64)
 
+    def test_text_lines_trailing_newline(self):
+        """末尾换行不应多算一行。"""
+        with_nl = self._write("nl.txt", "a\nb\nc\n")
+        self.assertEqual(read_file(with_nl).metadata["lines"], 3)
+        without = self._write("nn.txt", "a\nb\nc")
+        self.assertEqual(read_file(without).metadata["lines"], 3)
+
     def test_text_stats_before_truncation(self):
         """metadata.lines/characters 应反映截断前的真实规模。"""
         lines = [f"第 {i} 行" for i in range(4000)]
