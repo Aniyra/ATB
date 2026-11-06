@@ -605,6 +605,7 @@ ATB/
 ├─ tests/                 单元测试（标准库 unittest，98 用例）
 ├─ reports/               运行期产物：帧/分镜/放大/截图/错误日志（默认 7 天 TTL）
 ├─ requirements.txt
+├─ LICENSE                MIT 许可证
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
 ├─ atb_icon_preview.png   图标预览（README 展示用）
 ├─ make_icon.py           程序化生成多尺寸图标
@@ -660,6 +661,4 @@ reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文�
 
 ## 许可
 
-```
-© 2026 LFTAniyra。源代码以 MIT License 授权。
-```
+本项目基于 [MIT License](LICENSE) 授权，© 2026 LFTAniyra。
