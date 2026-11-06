@@ -41,7 +41,8 @@ TOOLS: List[dict] = [
             "properties": {
                 "path": {"type": "string", "description": "文件绝对路径"},
                 "format": {"type": "string", "description": "强制指定格式，如 pdf、docx、text"},
-                "max_chars": {"type": "integer", "description": "正文最大字符数，默认 200000"},
+                "max_chars": {"type": "integer",
+                              "description": "正文最大字符数，默认 200000；传 0 表示不限制"},
                 "pages": {"type": "string", "description": "PDF 页码，如 '1-5,8'"},
                 "sheet": {"type": "string", "description": "仅读取指定工作表/表格"},
                 "member": {"type": "string", "description": "读取压缩包内指定条目"},
@@ -216,7 +217,8 @@ TOOLS: List[dict] = [
             "properties": {
                 "path": {"type": "string"},
                 "format": {"type": "string"},
-                "max_chars": {"type": "integer"},
+                "max_chars": {"type": "integer",
+                              "description": "最大字符数，默认 200000；传 0 表示不限制"},
                 "pages": {"type": "string"},
             },
             "required": ["path"],
@@ -247,7 +249,8 @@ TOOLS: List[dict] = [
     },
     {
         "name": "atb_search_text",
-        "description": "在单个文件（任意格式）中搜索关键词，返回命中片段。",
+        "description": "在单个文件（任意格式）中搜索关键词，返回命中片段。"
+                       "total_hits 是全部命中数，hits 受 max_hits 限制。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -261,12 +264,14 @@ TOOLS: List[dict] = [
     },
     {
         "name": "atb_read_batch",
-        "description": "批量读取多个文件，返回每个文件的摘要与正文。",
+        "description": "批量读取多个文件，返回每个文件的摘要与正文。"
+                       "单次最多 200 条；超出部分会返回一条显式的 skipped 记录，不会静默丢弃。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "paths": {"type": "array", "items": {"type": "string"}},
-                "max_chars": {"type": "integer"},
+                "max_chars": {"type": "integer",
+                              "description": "最大字符数，默认 200000；传 0 表示不限制"},
             },
             "required": ["paths"],
         },
@@ -279,45 +284,88 @@ TOOLS: List[dict] = [
 ]
 
 
+class _ParseError(Exception):
+    """单条消息格式错误：回 -32700 后继续服务，不视为 EOF。"""
+
+
 class McpServer:
     def __init__(self, stdin=None, stdout=None):
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
+        # 二进制通道优先：Content-Length 是字节数，不能按字符读
+        self._in_bin = self._binary_of(self.stdin)
+        self._out_bin = self._binary_of(self.stdout)
+
+    @staticmethod
+    def _binary_of(stream):
+        if stream is None:
+            return None
+        try:
+            if isinstance(stream.read(0), bytes):
+                return stream
+        except Exception:
+            pass
+        return getattr(stream, "buffer", None)
 
     # ── 传输层 ──────────────────────────────────────────────
+    def _readline(self) -> str:
+        if self._in_bin is not None:
+            raw = self._in_bin.readline()
+            return raw.decode("utf-8", "replace") if raw else ""
+        return self.stdin.readline()
+
+    def _read_body(self, length: int) -> bytes:
+        """按字节读取消息体；文本流回退时按 UTF-8 字节数累计。"""
+        if self._in_bin is not None:
+            return self._in_bin.read(length)
+        chunks, total = [], 0
+        while total < length:
+            ch = self.stdin.read(1)
+            if not ch:
+                break
+            chunks.append(ch)
+            total += len(ch.encode("utf-8"))
+        return "".join(chunks).encode("utf-8")
+
     def _read_message(self) -> Optional[dict]:
         headers = {}
-        line = self.stdin.readline()
+        line = self._readline()
         while line and not line.strip():
-            line = self.stdin.readline()
+            line = self._readline()
         if not line:
             return None
-        if line.lower().startswith("content-length:"):
+        if line.lower().lstrip().startswith("content-length:"):
             try:
                 length = int(line.split(":", 1)[1].strip())
             except ValueError:
-                return None
+                raise _ParseError(f"Content-Length 无效：{line.strip()!r}")
+            if length < 0:
+                raise _ParseError(f"Content-Length 为负：{length}")
             while True:
-                h = self.stdin.readline()
+                h = self._readline()
                 if not h or h in ("\r\n", "\n"):
                     break
                 if ":" in h:
                     k, v = h.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
-            body = self.stdin.read(length)
+            body = self._read_body(length)
             try:
-                return json.loads(body)
-            except json.JSONDecodeError:
-                return None
+                return json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise _ParseError(f"消息体不是合法 UTF-8 JSON：{e}")
         try:
             return json.loads(line)
-        except json.JSONDecodeError:
-            return None
+        except json.JSONDecodeError as e:
+            raise _ParseError(f"消息不是合法 JSON：{e}")
 
     def _send(self, payload: dict) -> None:
-        data = json.dumps(payload, ensure_ascii=False, default=str)
-        self.stdout.write(data + "\n")
-        self.stdout.flush()
+        data = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+        if self._out_bin is not None:
+            self._out_bin.write(data.encode("utf-8"))
+            self._out_bin.flush()
+        else:
+            self.stdout.write(data)
+            self.stdout.flush()
 
     def _result(self, msg_id, result) -> None:
         self._send({"jsonrpc": "2.0", "id": msg_id, "result": result})
@@ -328,7 +376,12 @@ class McpServer:
     # ── 主循环 ──────────────────────────────────────────────
     def serve_forever(self) -> None:
         while True:
-            msg = self._read_message()
+            try:
+                msg = self._read_message()
+            except _ParseError as e:
+                # 单条坏消息不应终止服务：回 -32700 后继续读下一条
+                self._error(None, -32700, f"Parse error: {e}")
+                continue
             if msg is None:
                 break
             if not isinstance(msg, dict):
@@ -458,10 +511,11 @@ class McpServer:
         if name == "atb_search_text":
             return _search(args)
         if name == "atb_read_batch":
-            paths = args.get("paths") or []
-            opts = ReadOptions(max_chars=int(args.get("max_chars") or config.DEFAULT_MAX_CHARS))
+            paths = [p for p in (args.get("paths") or []) if isinstance(p, str)]
+            opts = ReadOptions(max_chars=_max_chars_arg(args))
+            limit = 200
             out = []
-            for p in paths[:50]:
+            for p in paths[:limit]:
                 doc = dispatch.read_file(p, opts, safe=True)
                 out.append({
                     "path": p,
@@ -469,6 +523,18 @@ class McpServer:
                     "format": doc.format,
                     "error": doc.error,
                     "text": doc.text(opts.max_chars) if doc.ok else "",
+                })
+            if len(paths) > limit:
+                out.append({
+                    "path": None,
+                    "ok": False,
+                    "skipped": True,
+                    "error": {
+                        "code": "ATB-E00004",
+                        "title": f"批量上限 {limit} 条",
+                        "detail": f"本次传入 {len(paths)} 条，最后 "
+                                  f"{len(paths) - limit} 条未读取；请分批调用",
+                    },
                 })
             return json.dumps(out, ensure_ascii=False, indent=2, default=str)
         if name == "atb_list_formats":
@@ -726,7 +792,7 @@ def _computer_payload(args: dict):
 
 def _opts_from(args: dict) -> ReadOptions:
     return ReadOptions(
-        max_chars=int(args.get("max_chars") or config.DEFAULT_MAX_CHARS),
+        max_chars=_max_chars_arg(args),
         pages=args.get("pages"),
         sheet=args.get("sheet"),
         member=args.get("member"),
@@ -736,6 +802,14 @@ def _opts_from(args: dict) -> ReadOptions:
     )
 
 
+def _max_chars_arg(args: dict) -> int:
+    """None → 默认上限；显式 0 → 不限制（与 CLI 语义一致）。"""
+    value = args.get("max_chars")
+    if value is None:
+        return config.DEFAULT_MAX_CHARS
+    return max(0, int(value))
+
+
 def _search(args: dict) -> str:
     path = args["path"]
     query = args["query"]
@@ -743,20 +817,25 @@ def _search(args: dict) -> str:
     max_hits = int(args.get("max_hits", 20))
     text = dispatch.extract_text(path)
     hits = []
+    total = 0
     start = 0
-    while len(hits) < max_hits:
+    while True:
         idx = text.find(query, start)
         if idx < 0:
             break
-        hits.append({
-            "offset": idx,
-            "match": text[idx: idx + len(query)],
-            "before": text[max(0, idx - context): idx],
-            "after": text[idx + len(query): idx + len(query) + context],
-        })
+        total += 1
+        if len(hits) < max_hits:
+            hits.append({
+                "offset": idx,
+                "match": text[idx: idx + len(query)],
+                "before": text[max(0, idx - context): idx],
+                "after": text[idx + len(query): idx + len(query) + context],
+            })
         start = idx + len(query)
     return json.dumps({"path": path, "query": query, "hits": hits,
-                       "total_hits": len(hits)}, ensure_ascii=False, indent=2)
+                       "total_hits": total, "returned": len(hits),
+                       "truncated": total > len(hits)},
+                      ensure_ascii=False, indent=2)
 
 
 def format_matrix() -> dict:

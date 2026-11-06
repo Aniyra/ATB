@@ -102,6 +102,16 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(info["format"], "text")
         self.assertEqual(len(info["sha256"]), 64)
 
+    def test_text_stats_before_truncation(self):
+        """metadata.lines/characters 应反映截断前的真实规模。"""
+        lines = [f"第 {i} 行" for i in range(4000)]
+        path = self._write("long.txt", "\n".join(lines))
+        doc = read_file(path, ReadOptions(max_chars=1000))
+        self.assertLessEqual(len(doc.text()), 1000)
+        self.assertEqual(doc.metadata["lines"], 4000)
+        self.assertEqual(doc.metadata["characters"], len("\n".join(lines)))
+        self.assertTrue(doc.truncated)
+
 
 if __name__ == "__main__":
     unittest.main()

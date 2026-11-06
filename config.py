@@ -6,7 +6,7 @@ import sys
 
 APP_NAME = "ATB (All Tool Box)"
 APP_SHORT = "ATB"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 APP_AUTHOR = "LFTAniyra"
 APP_DESC = "面向 AI Agent 的全格式文件读取工具箱"
 
@@ -34,3 +34,9 @@ DEFAULT_SCAN_LIMIT = 5000
 
 # 缓存与报告目录
 REPORT_DIR = os.path.join(BASE_DIR, "reports")
+
+# reports/ 下自动产物（抽帧/分镜/放大/截图）的保留天数；0 表示关闭自动清理
+try:
+    REPORT_TTL_DAYS = max(0, int(os.environ.get("ATB_REPORT_TTL_DAYS", "7")))
+except ValueError:
+    REPORT_TTL_DAYS = 7

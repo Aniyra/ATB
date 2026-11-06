@@ -315,6 +315,25 @@ python main.py cu launch --app "C:\Windows\notepad.exe"
 UI 元素树优先用可选依赖 `uiautomation`（`pip install uiautomation`）；未安装时退化为
 Win32 子窗口枚举，此时用 `--screenshot` + 坐标操作。MCP 工具：`atb_computer_use`。
 
+### 报告目录与 TTL 清理
+
+抽帧、分镜、局部放大、电脑截图会写入 `reports/`。默认保留 **7 天**，每次启动时静默清理过期文件：
+
+```bat
+:: 查看将清理什么（不删除）
+python main.py reports --days 7 --dry-run
+
+:: 立即清理 7 天前的产物
+python main.py reports --days 7
+
+:: 清空全部自动产物
+python main.py reports --days 0
+```
+
+- 保留天数可用环境变量调整：`ATB_REPORT_TTL_DAYS=14`；设为 `0` 关闭自动清理。
+- 只清理 `frames/` `storyboards/` `zoom/` `computer/` 四个目录，不影响 `atb_error_log.json`
+  和其他文件；清理后自动删除变空的目录。
+
 不带参数运行进入**交互菜单**：
 
 ```bat
@@ -323,7 +342,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ATB (All Tool Box)  v1.3.0                                               │
+│ ATB (All Tool Box)  v1.3.1                                               │
 │ 面向 AI Agent 的全格式文件读取工具箱                                      │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -566,6 +585,7 @@ ATB/
 │  ├─ storyboard.py       视频分镜：切点检测 / 分格 / 宫格图 / 字幕对齐
 │  ├─ quota.py            可选额度查询（环境变量 + ~/.atb/config.json）
 │  ├─ history.py          历史对话压缩（json/jsonl/md/纯文本 → 续接摘要）
+│  ├─ reports.py          reports 目录 TTL 清理（旧产物与空目录回收）
 │  ├─ errors.py           错误码体系与错误日志
 │  ├─ readers/
 │  │  ├─ base.py          基类、编码探测、页码解析、Document 构造
@@ -580,8 +600,8 @@ ATB/
 │  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
 │  └─ experimental/
 │     └─ computer.py      【实验性】电脑控制：窗口/元素树/点击/输入（Win32，仅 Windows）
-├─ tests/                 单元测试（标准库 unittest，81 用例）
-├─ reports/               运行期错误日志（自动创建）
+├─ tests/                 单元测试（标准库 unittest，93 用例）
+├─ reports/               运行期产物：帧/分镜/放大/截图/错误日志（默认 7 天 TTL）
 ├─ requirements.txt
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
 ├─ atb_icon_preview.png   图标预览（README 展示用）
@@ -606,6 +626,7 @@ python -m unittest discover -s tests -v
 MCP image content 回传）、视频分镜（切点检测、多图分格、时间窗、字幕对齐、局部放大、音频包络与导出、
 MCP 宫格图回传）、额度查询（配置读写、环境变量、脱敏、解析器）、历史对话压缩（json/jsonl/纯文本解析、
 去重、预算裁剪、MCP 回传）、电脑控制（按键解析、窗口枚举、错误码；不执行有副作用的操作）、
+reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文件不动）、
 进度组件（进度/ETA、spinner、禁用态）。
 
 ---
@@ -616,6 +637,7 @@ MCP 宫格图回传）、额度查询（配置读写、环境变量、脱敏、�
 - **不解压**：压缩包默认只列目录；读取内部条目时仅在内存中解压，不落盘，避免 Zip Slip。
 - **默认不联网**：核心能力零网络请求；仅 `atb quota` / `atb_query_quota` 会请求你配置的额度接口。
 - **电脑控制需显式调用**：只有 `atb cu` / `atb_computer_use` 会操作键鼠；读取文件时不会自动触发。
+- **报告自动过期**：`reports/` 下的帧/分镜/放大/截图默认 7 天清理，可用 `ATB_REPORT_TTL_DAYS` 调整或设为 0 关闭。
 - **隐私**：文件内容只在本机处理；MCP 模式下内容由客户端决定是否发送给模型。
 
 ---

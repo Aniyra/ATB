@@ -16,12 +16,13 @@ class TextReader(BaseReader):
     formats = ("text", "code")
 
     def read(self, path: str, det, opts: ReadOptions) -> Document:
-        text, encoding, warnings, truncated = read_text_file(path, opts)
+        stats = {}
+        text, encoding, warnings, truncated = read_text_file(path, opts, stats)
         doc = new_document(path, det, f"{self.name}.plain")
         doc.metadata = {
             "encoding": encoding,
-            "lines": text.count("\n") + 1 if text else 0,
-            "characters": len(text),
+            "lines": stats.get("lines", 0),
+            "characters": stats.get("characters", 0),
             "extension": os.path.splitext(path)[1].lower(),
         }
         doc.warnings.extend(warnings)

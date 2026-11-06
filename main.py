@@ -14,6 +14,7 @@
     python main.py quota [--set deepseek=KEY] [--init] [--show]
     python main.py ctx <对话存档> [--target-tokens N]
     python main.py cu <动作> [--app 窗口] [--json]
+    python main.py reports [--days N] [--dry-run]
     python main.py mcp                 # 启动 stdio MCP Server
     python main.py err [编号|关键词]    # 错误码速查
     python main.py                     # 交互菜单
@@ -30,7 +31,7 @@ import time
 import traceback
 
 import config
-from atb import dispatch, history, output, quota, ui
+from atb import dispatch, history, output, quota, reports, ui
 from atb.errors import (ERRORS, AtbError, all_errors, list_categories, log_error,
                         lookup, match_category, normalize_code, search_errors)
 from atb.mcp import format_matrix, main as mcp_main
@@ -203,6 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--screenshot", action="store_true", help="同时截图")
     sp.add_argument("--limit", type=int, default=50)
     sp.add_argument("--wait", type=float, default=8, help="launch 等待窗口秒数")
+    sp.add_argument("--json", action="store_true")
+
+    sp = sub.add_parser("reports", help="清理 reports 目录中的过期产物（TTL）")
+    sp.add_argument("--days", type=int, default=reports.DEFAULT_TTL_DAYS,
+                    help=f"保留天数，默认 {reports.DEFAULT_TTL_DAYS}；0=全部清理")
+    sp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="只统计，不删除")
     sp.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("scan", help="扫描目录")
@@ -506,6 +514,19 @@ def cmd_cu(a) -> int:
         }))
     else:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def cmd_reports(a) -> int:
+    result = reports.cleanup(a.days, a.dry_run)
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    verb = "可清理" if result["dry_run"] else "已清理"
+    ui.info(f"{verb} {result['removed_files']} 个文件、{result['removed_dirs']} 个空目录，"
+            f"释放 {reports.human_bytes(result['freed_bytes'])}")
+    ui.note(f"保留最近 {result['ttl_days']} 天；当前仍有 {result['kept_files']} 个文件，"
+            f"目录：{result['base']}")
     return 0
 
 
@@ -862,6 +883,17 @@ def _doctor() -> list:
 
 
 # ── 公共 ─────────────────────────────────────────────────────
+def _auto_cleanup_reports() -> None:
+    """按 TTL 静默清理 reports/ 下的自动产物；失败不影响主流程。"""
+    ttl = getattr(config, "REPORT_TTL_DAYS", 0)
+    if ttl <= 0:
+        return
+    try:
+        reports.cleanup(ttl)
+    except Exception:
+        pass
+
+
 def _emit(text: str, out_path: str = None) -> None:
     if out_path:
         output.write_output(text, out_path)
@@ -887,6 +919,7 @@ def main(argv=None) -> int:
     if getattr(args, "no_color", False):
         ui._COLOR["on"] = False
     _PROGRESS = make_progress(False if getattr(args, "no_progress", False) else None)
+    _auto_cleanup_reports()
 
     if not args.cmd or args.cmd == "menu":
         return interactive()
@@ -894,7 +927,7 @@ def main(argv=None) -> int:
     handlers = {
         "read": cmd_read, "text": cmd_text, "info": cmd_info, "video": cmd_video,
         "storyboard": cmd_storyboard, "zoom": cmd_zoom, "quota": cmd_quota,
-        "ctx": cmd_ctx, "cu": cmd_cu,
+        "ctx": cmd_ctx, "cu": cmd_cu, "reports": cmd_reports,
         "scan": cmd_scan, "formats": cmd_formats,
         "doctor": cmd_doctor, "mcp": cmd_mcp, "err": cmd_err,
     }

@@ -107,6 +107,93 @@ class McpTest(unittest.TestCase):
         payload = json.loads(res[8]["result"]["content"][0]["text"])
         self.assertTrue(payload["ok"])
 
+    def test_content_length_non_ascii_bytes(self):
+        """Content-Length 是字节数：中文消息不能被按字符读。"""
+        msgs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "atb_file_info", "arguments": {"path": self.txt}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "atb_extract_text", "arguments": {"path": self.txt}}},
+        ]
+        framed = b""
+        for msg in msgs:
+            payload = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+            framed += f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii") + payload
+        stdin, stdout = io.BytesIO(framed), io.BytesIO()
+        McpServer(stdin=stdin, stdout=stdout).serve_forever()
+        results = {}
+        for line in stdout.getvalue().decode("utf-8").splitlines():
+            if line.strip():
+                obj = json.loads(line)
+                results[obj.get("id")] = obj
+        self.assertEqual(set(results), {1, 2, 3})
+        self.assertIn("第二行", results[3]["result"]["content"][0]["text"])
+
+    def test_malformed_json_does_not_stop_server(self):
+        stdin = io.StringIO()
+        stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n")
+        stdin.write("{not valid json}\n")
+        stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}) + "\n")
+        stdin.seek(0)
+        stdout = io.StringIO()
+        McpServer(stdin=stdin, stdout=stdout).serve_forever()
+        results = {}
+        parse_errors = []
+        for line in stdout.getvalue().splitlines():
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if obj.get("error", {}).get("code") == -32700:
+                parse_errors.append(obj)
+            else:
+                results[obj.get("id")] = obj
+        self.assertEqual(set(results), {1, 3})
+        self.assertEqual(len(parse_errors), 1)
+
+    def test_max_chars_zero_means_unlimited(self):
+        path = os.path.join(self.tmp.name, "big.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("x" * 200_050)
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+             "params": {"name": "atb_extract_text",
+                        "arguments": {"path": path, "max_chars": 0}}},
+        ]
+        res = self._run(msgs)
+        self.assertGreater(len(res[11]["result"]["content"][0]["text"]), 200_000)
+
+    def test_search_reports_total_hits(self):
+        path = os.path.join(self.tmp.name, "hits.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("hit " * 100)
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+             "params": {"name": "atb_search_text",
+                        "arguments": {"path": path, "query": "hit", "max_hits": 3}}},
+        ]
+        res = self._run(msgs)
+        payload = json.loads(res[12]["result"]["content"][0]["text"])
+        self.assertEqual(payload["total_hits"], 100)
+        self.assertEqual(payload["returned"], 3)
+        self.assertTrue(payload["truncated"])
+
+    def test_read_batch_does_not_drop_over_50(self):
+        paths = []
+        for i in range(52):
+            p = os.path.join(self.tmp.name, f"b{i}.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(f"file {i}")
+            paths.append(p)
+        msgs = self._base() + [
+            {"jsonrpc": "2.0", "id": 13, "method": "tools/call",
+             "params": {"name": "atb_read_batch", "arguments": {"paths": paths}}},
+        ]
+        res = self._run(msgs)
+        payload = json.loads(res[13]["result"]["content"][0]["text"])
+        self.assertEqual(len(payload), 52)
+        self.assertTrue(all(item["ok"] for item in payload))
+
     def test_tool_error_is_reported_not_crashing(self):
         msgs = self._base() + [
             {"jsonrpc": "2.0", "id": 6, "method": "tools/call",

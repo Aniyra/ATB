@@ -74,8 +74,12 @@ def read_bytes(path: str, opts: ReadOptions) -> bytes:
         return f.read()
 
 
-def read_text_file(path: str, opts: ReadOptions) -> Tuple[str, str, List[str], bool]:
-    """读取文本文件，返回 (text, encoding, warnings, truncated)。"""
+def read_text_file(path: str, opts: ReadOptions,
+                   stats: dict = None) -> Tuple[str, str, List[str], bool]:
+    """读取文本文件，返回 (text, encoding, warnings, truncated)。
+
+    stats 非空时填入截断前的 lines / characters（用于元数据）。
+    """
     size = os.path.getsize(path)
     truncated = size > opts.max_bytes
     data = read_bytes(path, opts)
@@ -89,12 +93,17 @@ def read_text_file(path: str, opts: ReadOptions) -> Tuple[str, str, List[str], b
         if bad / len(text) > 0.1:
             raise AtbError("ATB-E03002", path)
 
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if stats is not None:
+        stats["lines"] = text.count("\n") + 1 if text else 0
+        stats["characters"] = len(text)
+
     if opts.max_chars and len(text) > opts.max_chars:
         text = text[: opts.max_chars]
         truncated = True
         warns.append(f"文本超过 {opts.max_chars} 字符上限，已截断")
 
-    return text.replace("\r\n", "\n").replace("\r", "\n"), enc, warns, truncated
+    return text, enc, warns, truncated
 
 
 def split_paragraphs(text: str) -> List[str]:
