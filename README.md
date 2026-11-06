@@ -1,10 +1,69 @@
-<p align="center"><img src="atb_icon_preview.png" width="120" alt="ATB icon"></p>
+<p align="center"><img src="atb_icon_preview.png" width="110" alt="ATB icon"></p>
 
-# ATB — All Tool Box
+<h1 align="center">ATB — All Tool Box</h1>
 
-> 面向 AI Agent 的**全格式文件读取工具箱**：一个命令、一套 schema，把任意文件变成 Agent 能直接消费的文本与结构化数据。
->
-> 同时提供 **CLI**、**Python API** 与 **MCP Server** 三种接入方式。
+<p align="center"><b>给 AI Agent 的全格式文件读取工具箱</b><br>
+PDF / Office / 图片 / 音视频 / 压缩包 / 数据库……一个命令、一套 schema，<br>
+把任意文件变成模型能直接消费的文本与结构化数据。</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+">
+  <a href="https://github.com/Aniyra/ATB/releases/latest"><img src="https://img.shields.io/github/v/release/Aniyra/ATB" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/MCP-stdio-8A2BE2.svg" alt="MCP stdio">
+  <img src="https://img.shields.io/badge/tests-98%20passed-brightgreen.svg" alt="Tests">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Aniyra/ATB/releases/latest"><b>下载 Windows 单文件 exe</b></a>
+  ·
+  <a href="#30-秒接入-mcp">MCP 接入</a>
+  ·
+  <a href="#支持的格式">支持格式</a>
+  ·
+  <a href="#python-api">Python API</a>
+</p>
+
+---
+
+## 30 秒接入 MCP
+
+把 ATB 挂到 Trae / Claude Desktop / Cursor 等支持 MCP 的客户端，模型就能自己决定读哪个文件、怎么读。
+
+```json
+{
+  "mcpServers": {
+    "atb": {
+      "command": "D:\\ATB\\dist\\ATB.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+没有 exe（已装依赖）时用源码方式：
+
+```json
+{
+  "mcpServers": {
+    "atb": {
+      "command": "D:\\ATB\\.venv\\Scripts\\python.exe",
+      "args": ["D:\\ATB\\main.py", "mcp"]
+    }
+  }
+}
+```
+
+接入后直接这样要求模型：**「用 atb 读取 D:\docs\报告.pdf，按章节总结」**。
+
+CLI 一条命令同样可以：
+
+```bat
+python main.py read "D:\docs\报告.pdf" --md
+```
+
+> 内置 14 个 MCP 工具：任意文件读取、视频抽帧 / 分镜 / 局部放大、文本搜索、批量读取、目录扫描、
+> 额度查询、历史对话压缩、电脑操作（实验性）。零额外 MCP 依赖，纯 stdio + JSON-RPC 2.0。
 
 ---
 
