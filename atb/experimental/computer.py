@@ -1,32 +1,24 @@
 # -*- coding: utf-8 -*-
-"""实验性：电脑控制（复刻 Trae Computer Use 的基础能力）。
+"""实验性：Windows UI 精准编辑。
 
-设计原则：
-- 仅 Windows，用 ctypes 调 Win32 API，**不引入必需的新依赖**；
-- UI 元素树优先用可选依赖 uiautomation，缺失时退化为 Win32 子窗口枚举；
-- 所有失败都抛 AtbError（带错误码与解决方案），不污染 ATB 的其他能力；
-- 实验性：行为可能随版本调整，不保证在所有应用上可用。
+本模块从早期的「电脑操作 / Computer Use」收窄而来：
+- 已移除：屏幕坐标点击、拖拽、滚动、键鼠注入、启动应用、窗口列表等桌面自动化；
+- 保留：基于 UI Automation 的语义化操作——读取元素树、按文本定位、
+  设置值、选择文本、执行元素动作。
 
-能力对照（Trae 工具 → 本模块）：
-  list_apps / launch_app / get_app_state / click / scroll / drag / type_text /
-  press_key / select_text / set_value / perform_action / grounding  → 已实现基础版
-  resolve_recorded_step / verify_recorded_step（录制回放）           → 未实现
+这样既避免误点/误输入带来的不可审计风险，又保留可精确到元素的编辑能力。
+仅 Windows；uiautomation 缺失时只读状态退化为子窗口枚举，写操作会明确报错。
 """
 
 import ctypes
 import os
-import shutil
-import subprocess
 import sys
-import time
 from typing import Optional
 
-import config
 from ..errors import AtbError
 
 IS_WINDOWS = sys.platform == "win32"
 
-# 子窗口 / 元素树默认上限，避免一次吐爆上下文
 DEFAULT_DEPTH = 3
 DEFAULT_MAX_NODES = 120
 
@@ -57,15 +49,6 @@ if IS_WINDOWS:
     _u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
     _u32.GetWindowRect.restype = wintypes.BOOL
     _u32.GetForegroundWindow.restype = wintypes.HWND
-    _u32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    _u32.SetForegroundWindow.restype = wintypes.BOOL
-    _u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    _u32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
-    _u32.SetCursorPos.restype = wintypes.BOOL
-    _u32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
-                                 wintypes.DWORD, ctypes.c_void_p]
-    _u32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD,
-                                 ctypes.c_void_p]
     _u32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
     _u32.EnumWindows.restype = wintypes.BOOL
     _u32.EnumChildWindows.argtypes = [wintypes.HWND, _WNDENUMPROC, wintypes.LPARAM]
@@ -87,43 +70,23 @@ if IS_WINDOWS:
         _dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
                                                ctypes.c_void_p, wintypes.DWORD]
 
-_DPI_DONE = False
-
 
 # ── 基础 ─────────────────────────────────────────────────────
 def _require_windows() -> None:
     if not IS_WINDOWS:
         raise AtbError("ATB-E13001",
-                       f"当前平台为 {sys.platform}；电脑控制仅支持 Windows")
-
-
-def _enable_dpi() -> None:
-    """统一坐标系：让截图、窗口矩形与鼠标坐标都按物理像素计算。"""
-    global _DPI_DONE
-    if _DPI_DONE or not IS_WINDOWS:
-        return
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-    _DPI_DONE = True
+                       f"当前平台为 {sys.platform}；UI 精准编辑仅支持 Windows")
 
 
 def available() -> dict:
-    """返回本机电脑控制能力（供 doctor / MCP 说明用）。"""
-    _enable_dpi()
+    """返回本机 UI 精准编辑能力（供 doctor / MCP 说明用）。"""
     uia = _uia() is not None
-    shot = _pillow() is not None
     if not IS_WINDOWS:
         return {"ok": False, "platform": sys.platform, "uiautomation": uia,
-                "screenshot": shot,
-                "reason": "仅支持 Windows；其他平台请使用系统自带自动化工具"}
-    return {"ok": True, "platform": sys.platform, "uiautomation": uia,
-            "screenshot": shot,
-            "reason": "" if uia else "未安装可选的 uiautomation，元素树退化为子窗口枚举"}
+                "reason": "仅支持 Windows"}
+    return {"ok": uia, "platform": sys.platform, "uiautomation": uia,
+            "reason": "" if uia else
+            "未安装 uiautomation：只能读取子窗口，不能设置值/选择文本/执行动作"}
 
 
 def _uia():
@@ -135,19 +98,7 @@ def _uia():
         return None
 
 
-def _pillow():
-    try:
-        from PIL import ImageGrab  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-def _now() -> str:
-    return time.strftime("%Y%m%d_%H%M%S")
-
-
-# ── 窗口枚举 ─────────────────────────────────────────────────
+# ── 窗口定位（只读） ─────────────────────────────────────────
 def _window_title(hwnd: int) -> str:
     n = _u32.GetWindowTextLengthW(hwnd)
     if n <= 0:
@@ -226,7 +177,7 @@ def _iter_child_windows(hwnd: int) -> list:
     return hwnds
 
 
-def _window_info(hwnd: int, fg: Optional[int] = None) -> Optional[dict]:
+def _window_info(hwnd: int) -> Optional[dict]:
     bounds = _window_bounds(hwnd)
     if not bounds or bounds[2] <= 0 or bounds[3] <= 0:
         return None
@@ -241,15 +192,10 @@ def _window_info(hwnd: int, fg: Optional[int] = None) -> Optional[dict]:
         "pid": pid,
         "process": proc,
         "bounds": bounds,
-        "foreground": hwnd == (fg if fg is not None else _u32.GetForegroundWindow()),
     }
 
 
-# ── 应用定位 ─────────────────────────────────────────────────
-def list_apps(limit: int = 50, include_empty: bool = False) -> list:
-    _require_windows()
-    _enable_dpi()
-    fg = _u32.GetForegroundWindow()
+def _visible_windows(limit: int = 400) -> list:
     out = []
     for hwnd in _iter_top_windows():
         if not _u32.IsWindowVisible(hwnd) or _is_cloaked(hwnd):
@@ -257,13 +203,9 @@ def list_apps(limit: int = 50, include_empty: bool = False) -> list:
         ex_style = _u32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
         if ex_style & 0x00000080:  # WS_EX_TOOLWINDOW
             continue
-        info = _window_info(hwnd, fg)
-        if not info:
-            continue
-        if not include_empty and not info["title"]:
-            continue
-        out.append(info)
-    out.sort(key=lambda w: (not w["foreground"], w["process"], w["title"]))
+        info = _window_info(hwnd)
+        if info:
+            out.append(info)
     return out[:max(1, limit)]
 
 
@@ -290,28 +232,16 @@ def _resolve_app(app) -> dict:
     if text.isdigit():
         return _resolve_app(int(text))
 
-    apps = list_apps(limit=400, include_empty=True)
+    windows = _visible_windows()
     lowered = text.lower()
-    for item in apps:                      # app_id 精确
+    for item in windows:
         if item["app_id"].lower() == lowered:
             return item
-    for item in apps:                      # 进程名 / 标题片段
+    for item in windows:
         if lowered in item["process"].lower() or lowered in item["title"].lower():
             return item
-    if text.startswith("pid:"):
-        pid = int(text.split(":", 1)[1])
-        for item in apps:
-            if item["pid"] == pid:
-                return item
     raise AtbError("ATB-E13002",
-                   f"未找到应用 {text!r}；先用 `atb cu list` 查看 app_id 与窗口标题")
-
-
-def _activate(info: dict) -> None:
-    hwnd = info["hwnd"]
-    _u32.ShowWindow(hwnd, 9)  # SW_RESTORE
-    _u32.SetForegroundWindow(hwnd)
-    time.sleep(0.08)
+                   f"未找到应用 {text!r}；请传窗口标题片段、进程名或 hwnd:123")
 
 
 # ── 元素树 ───────────────────────────────────────────────────
@@ -366,48 +296,23 @@ def _state_from_children(info: dict, max_nodes: int) -> list:
             break
         if not _u32.IsWindowVisible(hwnd):
             continue
-        bounds = _window_bounds(hwnd)
         nodes.append({
             "element_id": f"hwnd:{hwnd}",
             "name": _window_title(hwnd),
             "type": _window_class(hwnd) or "ChildWindow",
             "automation_id": "",
-            "bounds": bounds,
-            "enabled": not (bounds is None),
+            "bounds": _window_bounds(hwnd),
+            "enabled": True,
         })
     return nodes
 
 
-def _screenshot(info: dict) -> Optional[dict]:
-    if not _pillow():
-        return None
-    try:
-        from PIL import ImageGrab
-    except Exception:
-        return None
-    x, y, w, h = info["bounds"]
-    try:
-        img = ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True)
-    except Exception:
-        return None
-    out_dir = os.path.join(config.REPORT_DIR, "computer",
-                           f"{os.path.splitext(info['process'])[0] or 'app'}_{info['pid']}")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"state_{_now()}.jpg")
-    img.convert("RGB").save(path, "JPEG", quality=85)
-    return {"path": path, "width": img.width, "height": img.height,
-            "tokens_estimate": max(1, img.width * img.height // 750)}
-
-
 def get_app_state(app, depth: int = DEFAULT_DEPTH,
-                  max_nodes: int = DEFAULT_MAX_NODES,
-                  screenshot: bool = False) -> dict:
+                  max_nodes: int = DEFAULT_MAX_NODES) -> dict:
     _require_windows()
-    _enable_dpi()
     info = _resolve_app(app)
     auto = _uia()
-    nodes = []
-    source = "win32-children"
+    nodes, source = [], "win32-children"
     if auto is not None:
         try:
             root = auto.ControlFromHandle(info["hwnd"])
@@ -424,12 +329,11 @@ def get_app_state(app, depth: int = DEFAULT_DEPTH,
         "source": source,
         "nodes": nodes,
         "node_count": len(nodes),
-        "screenshot": _screenshot(info) if screenshot else None,
-        "hint": "element_id 仅对同一窗口的当前状态有效；界面变化后请重新获取状态。",
+        "hint": "element_id 只在同一窗口的当前状态有效；界面变化后请重新获取状态。",
     }
     if auto is None:
-        payload["warning"] = ("未安装可选依赖 uiautomation，元素树退化为子窗口枚举，"
-                              "只能拿到窗口级控件；装 pip install uiautomation 可获得完整控件树。")
+        payload["warning"] = ("未安装 uiautomation：只能读取子窗口，"
+                              "不能设置值/选择文本/执行动作。")
     return payload
 
 
@@ -438,229 +342,27 @@ def _find_by_path(info: dict, element_id: str) -> dict:
         hwnd = int(element_id.split(":", 1)[1])
         if not _u32.IsWindow(hwnd):
             raise AtbError("ATB-E13002", f"子窗口不存在：{hwnd}")
-        bounds = _window_bounds(hwnd)
-        return {"hwnd": hwnd, "bounds": bounds, "name": _window_title(hwnd),
-                "control": None}
+        return {"hwnd": hwnd, "bounds": _window_bounds(hwnd),
+                "name": _window_title(hwnd), "control": None}
     auto = _uia()
     if auto is None:
         raise AtbError("ATB-E13003",
-                       "需要可选依赖 uiautomation 才能按 element_id 定位；"
-                       "请安装 pip install uiautomation，或改用屏幕坐标 x/y")
+                       "按 element_id 精细操作需要可选依赖 uiautomation："
+                       "pip install uiautomation")
     try:
         ctrl = auto.ControlFromHandle(info["hwnd"])
         for idx in element_id.split(".")[1:]:
             ctrl = ctrl.GetChildren()[int(idx)]
         r = ctrl.BoundingRectangle
-        return {"hwnd": info["hwnd"], "bounds": [r.left, r.top, r.right - r.left,
-                                                 r.bottom - r.top],
+        return {"hwnd": info["hwnd"],
+                "bounds": [r.left, r.top, r.right - r.left, r.bottom - r.top],
                 "name": ctrl.Name or "", "control": ctrl}
     except Exception as e:
         raise AtbError("ATB-E13003", f"element_id {element_id!r} 已失效：{e}；"
-                                     f"请重新调用 get_app_state")
+                                     f"请重新调用 state")
 
 
-# ── 输入 ─────────────────────────────────────────────────────
-def _click_point(x: int, y: int) -> None:
-    _u32.SetCursorPos(int(x), int(y))
-    time.sleep(0.02)
-    _u32.mouse_event(0x0002, 0, 0, 0, None)  # LEFTDOWN
-    time.sleep(0.02)
-    _u32.mouse_event(0x0004, 0, 0, 0, None)  # LEFTUP
-
-
-def click(app=None, x: Optional[int] = None, y: Optional[int] = None,
-          element_id: Optional[str] = None) -> dict:
-    _require_windows()
-    _enable_dpi()
-    info = _resolve_app(app) if (app or element_id) else None
-    if element_id:
-        if info is None:
-            raise AtbError("ATB-E00003", "使用 element_id 时必须同时提供 app")
-        target = _find_by_path(info, element_id)
-        bounds = target["bounds"]
-        if not bounds or bounds[2] <= 0 or bounds[3] <= 0:
-            raise AtbError("ATB-E13004", f"元素 {element_id} 没有可见区域")
-        x = bounds[0] + bounds[2] // 2
-        y = bounds[1] + bounds[3] // 2
-        if info:
-            _activate(info)
-    elif x is None or y is None:
-        raise AtbError("ATB-E00003", "click 需要 x/y 坐标或 element_id")
-    if info:
-        _activate(info)
-    _click_point(x, y)
-    return {"ok": True, "x": int(x), "y": int(y),
-            "app": info["app_id"] if info else None}
-
-
-def scroll(direction: str = "down", amount: int = 3,
-           x: Optional[int] = None, y: Optional[int] = None, app=None) -> dict:
-    _require_windows()
-    _enable_dpi()
-    direction = (direction or "down").lower()
-    if direction not in ("up", "down", "left", "right"):
-        raise AtbError("ATB-E00003", f"direction 需为 up/down/left/right：{direction}")
-    info = _resolve_app(app) if app else None
-    if info:
-        _activate(info)
-    if x is not None and y is not None:
-        _u32.SetCursorPos(int(x), int(y))
-        time.sleep(0.02)
-    steps = max(1, int(amount))
-    if direction in ("up", "down"):
-        delta = 120 * steps * (1 if direction == "up" else -1)
-        for _ in range(steps):
-            _u32.mouse_event(0x0800, 0, 0, delta // steps, None)  # MOUSEEVENTF_WHEEL
-            time.sleep(0.02)
-    else:
-        delta = 120 * steps * (1 if direction == "right" else -1)
-        for _ in range(steps):
-            _u32.mouse_event(0x01000, 0, 0, delta // steps, None)  # MOUSEEVENTF_HWHEEL
-            time.sleep(0.02)
-    return {"ok": True, "direction": direction, "amount": steps}
-
-
-def drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.4) -> dict:
-    _require_windows()
-    _enable_dpi()
-    _u32.SetCursorPos(int(x1), int(y1))
-    time.sleep(0.05)
-    _u32.mouse_event(0x0002, 0, 0, 0, None)
-    steps = max(4, int(duration * 40))
-    for i in range(1, steps + 1):
-        _u32.SetCursorPos(int(x1 + (x2 - x1) * i / steps),
-                          int(y1 + (y2 - y1) * i / steps))
-        time.sleep(duration / steps)
-    _u32.mouse_event(0x0004, 0, 0, 0, None)
-    return {"ok": True, "from": [x1, y1], "to": [x2, y2]}
-
-
-VK = {
-    "ctrl": 0x11, "control": 0x11, "alt": 0x12, "shift": 0x10,
-    "win": 0x5B, "meta": 0x5B, "cmd": 0x5B,
-    "enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
-    "space": 0x20, "backspace": 0x08, "delete": 0x2E, "del": 0x2E,
-    "insert": 0x2D, "home": 0x24, "end": 0x23,
-    "pageup": 0x21, "pagedown": 0x22,
-    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-    "capslock": 0x14, "printscreen": 0x2C,
-    "+": 0xBB, "=": 0xBB, "-": 0xBD, ",": 0xBC, ".": 0xBE, "/": 0xBF,
-    ";": 0xBA, "'": 0xDE, "[": 0xDB, "]": 0xDD, "\\": 0xDC, "`": 0xC0,
-}
-
-
-def parse_keys(keys: str) -> list:
-    """把 'ctrl+shift+s' 解析为虚拟键列表（含顺序）。"""
-    raw = (keys or "").strip().lower()
-    if not raw:
-        raise AtbError("ATB-E00003", "keys 不能为空")
-    if raw.endswith("++"):
-        parts = [p for p in raw[:-2].split("+") if p] + ["+"]
-    else:
-        parts = [p for p in raw.split("+") if p]
-    out = []
-    for token in parts:
-        if token in VK:
-            out.append(VK[token])
-        elif len(token) == 1 and token.isalnum():
-            out.append(ord(token.upper()))
-        elif token.startswith("f") and token[1:].isdigit() and 1 <= int(token[1:]) <= 24:
-            out.append(0x70 + int(token[1:]) - 1)
-        else:
-            raise AtbError("ATB-E00003", f"无法识别的按键 {token!r}；"
-                                         f"可用 ctrl/alt/shift/win/enter/tab/f1-24 等")
-    return out
-
-
-def press_key(keys: str, app=None, repeat: int = 1) -> dict:
-    _require_windows()
-    info = _resolve_app(app) if app else None
-    if info:
-        _activate(info)
-    vks = parse_keys(keys)
-    for _ in range(max(1, int(repeat))):
-        for vk in vks:
-            _u32.keybd_event(vk, 0, 0, None)
-            time.sleep(0.01)
-        for vk in reversed(vks):
-            _u32.keybd_event(vk, 0, 0x0002, None)
-            time.sleep(0.01)
-    return {"ok": True, "keys": keys, "vk": vks, "repeat": repeat}
-
-
-def type_text(text: str, app=None, interval: float = 0.005) -> dict:
-    _require_windows()
-    info = _resolve_app(app) if app else None
-    if info:
-        _activate(info)
-    written = 0
-    for ch in text:
-        for unit in _utf16_units(ch):
-            _u32.keybd_event(0xE7, unit & 0xFFFF, 0x0004, None)        # KEYEVENTF_UNICODE
-            _u32.keybd_event(0xE7, unit & 0xFFFF, 0x0004 | 0x0002, None)
-            written += 1
-            if interval:
-                time.sleep(interval)
-    return {"ok": True, "chars": len(text), "units": written}
-
-
-def _utf16_units(ch: str) -> list:
-    data = ch.encode("utf-16-le", "surrogatepass")
-    return [int.from_bytes(data[i:i + 2], "little") for i in range(0, len(data), 2)]
-
-
-def select_text(app=None, element_id: Optional[str] = None) -> dict:
-    """基础实现：聚焦元素后全选（Ctrl+A）。细粒度选择需 uiautomation TextPattern。"""
-    _require_windows()
-    info = _resolve_app(app) if app else None
-    if element_id:
-        if info is None:
-            raise AtbError("ATB-E00003", "使用 element_id 时必须同时提供 app")
-        click(app=info["app_id"], element_id=element_id)
-    if info:
-        _activate(info)
-    press_key("ctrl+a")
-    return {"ok": True, "note": "已执行全选；如需按范围选择，请安装 uiautomation 后用 TextPattern"}
-
-
-def set_value(element_id: str, value: str, app=None) -> dict:
-    _require_windows()
-    info = _resolve_app(app)
-    target = _find_by_path(info, element_id)
-    ctrl = target.get("control")
-    if ctrl is not None:
-        try:
-            ctrl.GetValuePattern().SetValue(value)
-            return {"ok": True, "method": "uiautomation.ValuePattern",
-                    "element_id": element_id}
-        except Exception:
-            pass
-    click(app=info["app_id"], element_id=element_id)
-    press_key("ctrl+a")
-    type_text(value)
-    return {"ok": True, "method": "click+select+type（降级）", "element_id": element_id}
-
-
-def perform_action(element_id: str, app=None) -> dict:
-    _require_windows()
-    info = _resolve_app(app)
-    target = _find_by_path(info, element_id)
-    ctrl = target.get("control")
-    if ctrl is not None:
-        for attr in ("GetInvokePattern", "GetLegacyIAccessiblePattern"):
-            try:
-                pattern = getattr(ctrl, attr)()
-                if attr == "GetInvokePattern":
-                    pattern.Invoke()
-                else:
-                    pattern.DoDefaultAction()
-                return {"ok": True, "method": attr, "element_id": element_id}
-            except Exception:
-                continue
-    click(app=info["app_id"], element_id=element_id)
-    return {"ok": True, "method": "click（降级）", "element_id": element_id}
-
-
+# ── 精准编辑 ─────────────────────────────────────────────────
 def grounding(text: str, app=None, exact: bool = False,
               depth: int = 4, max_nodes: int = 400) -> dict:
     """按可见文本定位元素，返回 element_id 与屏幕区域。"""
@@ -671,7 +373,11 @@ def grounding(text: str, app=None, exact: bool = False,
     needle = (text or "").strip().lower()
     if not needle:
         raise AtbError("ATB-E00003", "grounding 需要 text")
-    nodes = get_app_state(info["app_id"], depth=depth, max_nodes=max_nodes)["nodes"]
+    state = get_app_state(info["app_id"], depth=depth, max_nodes=max_nodes)
+    nodes = state["nodes"]
+    if state["source"] != "uiautomation":
+        return {"found": False, "text": text, "app": info["app_id"],
+                "hint": "需要 uiautomation 才能按控件文本精确定位"}
     best = None
     for node in nodes:
         name = (node.get("name") or "").lower()
@@ -685,37 +391,71 @@ def grounding(text: str, app=None, exact: bool = False,
             best = (area, node)
     if not best:
         return {"found": False, "text": text, "app": info["app_id"],
-                "hint": "可放宽 depth/max_nodes，或改用截图 + 坐标点击"}
+                "hint": "可放宽 depth/max_nodes，或换一个更短的可见文本"}
     return {"found": True, "text": text, "app": info["app_id"], **best[1]}
 
 
-def launch_app(app: str, args: Optional[list] = None,
-               wait: float = 8.0) -> dict:
+def set_value(element_id: str, value: str, app=None) -> dict:
+    """通过 UI Automation ValuePattern 精确设置可编辑元素的值。"""
     _require_windows()
-    args = list(args or [])
-    exe = app if os.path.isfile(app) else shutil.which(app)
-    if not exe:
-        raise AtbError("ATB-E13002",
-                       f"找不到可执行文件 {app!r}；请传绝对路径，或确认它在 PATH 中")
-    proc = subprocess.Popen([exe] + args, close_fds=True)
-    deadline = time.time() + max(0.5, wait)
-    window = None
-    while time.time() < deadline:
-        time.sleep(0.2)
-        for item in list_apps(limit=400, include_empty=True):
-            if item["pid"] == proc.pid:
-                window = item
-                break
-        if window:
-            break
-    return {"ok": True, "pid": proc.pid, "exe": exe,
-            "window": window,
-            "app_id": window["app_id"] if window else None}
+    info = _resolve_app(app)
+    target = _find_by_path(info, element_id)
+    ctrl = target.get("control")
+    if ctrl is None:
+        raise AtbError("ATB-E13003",
+                       "该 element_id 不是 UI Automation 控件，无法设置值；"
+                       "请重新 state 并选择可编辑控件")
+    try:
+        ctrl.GetValuePattern().SetValue(value)
+    except Exception as e:
+        raise AtbError("ATB-E13004", f"设置值失败：{e}")
+    return {"ok": True, "method": "uiautomation.ValuePattern",
+            "element_id": element_id}
+
+
+def select_text(element_id: str, app=None) -> dict:
+    """通过 UI Automation TextPattern 精确选择控件内文本。"""
+    _require_windows()
+    info = _resolve_app(app)
+    target = _find_by_path(info, element_id)
+    ctrl = target.get("control")
+    if ctrl is None:
+        raise AtbError("ATB-E13003",
+                       "该 element_id 不是 UI Automation 控件，无法选择文本")
+    try:
+        ctrl.SetFocus()
+        ctrl.GetTextPattern().DocumentRange.Select()
+    except Exception as e:
+        raise AtbError("ATB-E13004", f"选择文本失败：{e}")
+    return {"ok": True, "method": "uiautomation.TextPattern",
+            "element_id": element_id}
+
+
+def perform_action(element_id: str, app=None) -> dict:
+    """执行元素的语义动作（Invoke / 默认动作），不做坐标点击。"""
+    _require_windows()
+    info = _resolve_app(app)
+    target = _find_by_path(info, element_id)
+    ctrl = target.get("control")
+    if ctrl is None:
+        raise AtbError("ATB-E13003",
+                       "该 element_id 不是 UI Automation 控件，无法执行动作")
+    for attr in ("GetInvokePattern", "GetLegacyIAccessiblePattern"):
+        try:
+            pattern = getattr(ctrl, attr)()
+            if attr == "GetInvokePattern":
+                pattern.Invoke()
+            else:
+                pattern.DoDefaultAction()
+            return {"ok": True, "method": attr, "element_id": element_id}
+        except Exception:
+            continue
+    raise AtbError("ATB-E13004",
+                   "元素不支持 Invoke/默认动作；请改用 set_value 或换一个控件")
 
 
 # ── 统一分发（CLI / MCP 共用） ────────────────────────────────
-ACTIONS = ("available", "list", "state", "launch", "click", "scroll", "drag",
-           "type", "key", "select", "set_value", "action", "ground")
+ACTIONS = ("available", "state", "ground", "set_value", "select", "action")
 
 
 def dispatch(action: str, params: dict = None) -> dict:
@@ -723,42 +463,20 @@ def dispatch(action: str, params: dict = None) -> dict:
     action = (action or "").lower()
     if action == "available":
         return available()
-    if action == "list":
-        return {"apps": list_apps(int(params.get("limit") or 50),
-                                  bool(params.get("include_empty")))}
     if action == "state":
         return get_app_state(params.get("app"),
                              depth=int(params.get("depth") or DEFAULT_DEPTH),
-                             max_nodes=int(params.get("max_nodes") or DEFAULT_MAX_NODES),
-                             screenshot=bool(params.get("screenshot")))
-    if action == "launch":
-        return launch_app(params["app"], params.get("args") or [],
-                          float(params.get("wait") or 8))
-    if action == "click":
-        return click(app=params.get("app"), x=params.get("x"), y=params.get("y"),
-                     element_id=params.get("element_id"))
-    if action == "scroll":
-        return scroll(params.get("direction") or "down", int(params.get("amount") or 3),
-                      params.get("x"), params.get("y"), params.get("app"))
-    if action == "drag":
-        return drag(int(params["x1"]), int(params["y1"]),
-                    int(params["x2"]), int(params["y2"]),
-                    float(params.get("duration") or 0.4))
-    if action == "type":
-        return type_text(params["text"], params.get("app"))
-    if action == "key":
-        return press_key(params["keys"], params.get("app"),
-                         int(params.get("repeat") or 1))
-    if action == "select":
-        return select_text(params.get("app"), params.get("element_id"))
-    if action == "set_value":
-        return set_value(params["element_id"], params["value"], params.get("app"))
-    if action == "action":
-        return perform_action(params["element_id"], params.get("app"))
+                             max_nodes=int(params.get("max_nodes") or DEFAULT_MAX_NODES))
     if action == "ground":
         return grounding(params["text"], params.get("app"),
                          bool(params.get("exact")),
                          int(params.get("depth") or 4),
                          int(params.get("max_nodes") or 400))
+    if action == "set_value":
+        return set_value(params["element_id"], params["value"], params.get("app"))
+    if action == "select":
+        return select_text(params["element_id"], params.get("app"))
+    if action == "action":
+        return perform_action(params["element_id"], params.get("app"))
     raise AtbError("ATB-E00003",
                    f"未知动作 {action!r}；可用：{', '.join(ACTIONS)}")
