@@ -3,6 +3,7 @@
 
 import re
 import zipfile
+import xml.etree.ElementTree as ET
 from html import unescape
 
 from ..errors import AtbError
@@ -17,6 +18,15 @@ class OfficeReader(BaseReader):
     formats = ("office",)
 
     def read(self, path: str, det, opts: ReadOptions) -> Document:
+        try:
+            return self._read(path, det, opts)
+        except AtbError:
+            raise
+        except Exception as e:
+            # 损坏的 docx/xlsx/pptx/odt 等统一归到办公文档解析失败
+            raise AtbError("ATB-E04001", f"{path} ({type(e).__name__}: {e})")
+
+    def _read(self, path: str, det, opts: ReadOptions) -> Document:
         ext = det.ext.lower() or det.subtype or ""
         if ext in ("docx", "docm", "dotx"):
             return self._docx(path, det, opts)
@@ -44,6 +54,17 @@ class OfficeReader(BaseReader):
         except ImportError:
             doc.warnings.append("未安装 python-docx，使用 ZIP+XML 粗提取")
             return self._docx_fallback(path, doc, opts)
+
+        # 先校验核心 XML，避免库在异常路径上留下未关闭的 ZIP 句柄
+        try:
+            with zipfile.ZipFile(path) as zf:
+                ET.fromstring(zf.read("word/document.xml"))
+        except KeyError:
+            raise AtbError("ATB-E04001", f"{path}（缺少 word/document.xml）")
+        except zipfile.BadZipFile as e:
+            raise AtbError("ATB-E04001", f"{path} ({e})")
+        except ET.ParseError as e:
+            raise AtbError("ATB-E04001", f"{path} (XML: {e})")
 
         d = DocxDocument(path)
         props = d.core_properties

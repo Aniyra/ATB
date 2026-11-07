@@ -22,7 +22,7 @@ from PyInstaller.utils.win32.versioninfo import (
 
 # ── 应用元信息（与 config.py 保持一致）──────────────────────
 APP_NAME = "ATB (All Tool Box)"
-APP_VERSION = "1.3.3.0"
+APP_VERSION = "1.3.4.0"
 APP_AUTHOR = "LFTAniyra"
 APP_COPYRIGHT = "Copyright (c) 2026 LFTAniyra"
 ICON_FILE = "atb.ico"

@@ -930,7 +930,8 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         _PROGRESS.close()
         print()
-        ui.warn("已中断")
+        err = AtbError("ATB-E00002")
+        ui.warn(f"{err.code}  {err.title}")
         return 130
     except Exception as e:
         _PROGRESS.close()

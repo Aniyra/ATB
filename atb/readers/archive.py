@@ -12,6 +12,7 @@ import lzma
 import os
 import struct
 import tarfile
+import tempfile
 import zipfile
 
 from ..errors import AtbError
@@ -116,25 +117,39 @@ class ArchiveReader(BaseReader):
         try:
             with py7zr.SevenZipFile(path, mode="r", password=opts.password) as z:
                 infos = z.list()
+                encrypted = z.needs_password()
                 doc.metadata.update({
                     "entries": len(infos),
                     "total_uncompressed": sum(i.uncompressed or 0 for i in infos),
-                    "encrypted": z.needs_password(),
+                    "encrypted": encrypted,
                 })
                 rows = [[i.filename, i.uncompressed or 0, "dir" if i.is_directory else "file"]
                         for i in infos[:MAX_ENTRIES]]
                 doc.blocks.append(Block("table", "", meta={
                     "header": ["name", "size", "type"], "rows": rows}))
                 if opts.member:
-                    data = z.read([opts.member])
-                    if data and opts.member in data:
-                        doc.blocks.extend(_append_text_block(
-                            doc, data[opts.member].read(), opts,
-                            f"7z:{opts.member}"))
+                    if encrypted and not opts.password:
+                        raise AtbError("ATB-E07002",
+                                       f"{path}（{opts.member} 已加密，请用 --password）")
+                    rel = opts.member.replace("\\", "/")
+                    if rel.startswith("/") or ".." in rel.split("/"):
+                        raise AtbError("ATB-E07001", f"成员路径不安全：{opts.member}")
+                    with tempfile.TemporaryDirectory() as tmp:
+                        z.extract(path=tmp, targets=[opts.member])
+                        target = os.path.join(tmp, *rel.split("/"))
+                        if not os.path.exists(target):
+                            doc.warnings.append(f"条目不存在：{opts.member}")
+                        else:
+                            with open(target, "rb") as f:
+                                data = f.read()
+                            doc.blocks.extend(_append_text_block(
+                                doc, data, opts, f"7z:{opts.member}"))
         except AtbError:
             raise
         except Exception as e:
-            if "password" in str(e).lower() or "encrypt" in str(e).lower():
+            msg = str(e).lower()
+            if isinstance(e, getattr(py7zr.exceptions, "PasswordRequired", ())) \
+                    or "password" in msg or "encrypt" in msg:
                 raise AtbError("ATB-E07002", f"{path}（请用 --password）")
             raise AtbError("ATB-E07001", f"{path} ({e})")
         return doc
@@ -330,9 +345,11 @@ def _read_zip_member(zf: zipfile.ZipFile, member: str, doc: Document, opts: Read
         return []
     if info.flag_bits & 0x1:
         if not opts.password:
-            doc.warnings.append(f"条目已加密：{member}")
-            return []
-        data = zf.read(info, pwd=opts.password.encode())
+            raise AtbError("ATB-E07002", f"{member} 已加密，请用 --password")
+        try:
+            data = zf.read(info, pwd=opts.password.encode())
+        except RuntimeError as e:
+            raise AtbError("ATB-E07002", f"{member} 密码错误：{e}")
     else:
         data = zf.read(info)
     return _append_text_block(doc, data, opts, f"zip:{member}")

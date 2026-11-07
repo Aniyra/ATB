@@ -54,10 +54,6 @@ ERRORS: Dict[str, Dict[str, str]] = {
         "solution": "扩展名缺失或伪造，且魔术字节未命中。可用 `--format <格式>` 显式指定，"
                     "或先运行 `{prog} info` 查看十六进制头。",
     },
-    "ATB-E02002": {
-        "title": "扩展名与实际内容不一致",
-        "solution": "已按实际内容（魔术字节）选择解析器。若结果异常，用 `--format` 强制指定。",
-    },
     "ATB-E03001": {
         "title": "文本解码失败",
         "solution": "编码探测未命中。用 `--encoding gbk|utf-8|gb18030|latin-1` 指定，"
@@ -73,20 +69,10 @@ ERRORS: Dict[str, Dict[str, str]] = {
         "solution": "文件可能损坏或为加密文档。尝试用 Office/WPS 另存为 docx/xlsx/pptx 后重试，"
                     "或确认未设置打开密码。",
     },
-    "ATB-E04002": {
-        "title": "旧版 Office 格式仅支持浅层提取",
-        "solution": "doc/xls/ppt（OLE 复合文档）仅能提取可见字符串。"
-                    "建议先转换为 docx/xlsx/pptx 以获得结构化内容。",
-    },
     "ATB-E05001": {
         "title": "PDF 解析失败",
         "solution": "文件可能加密或结构损坏。若设置了打开密码，用 --password 提供；"
                     "也可先用 `{prog} info` 确认是否为真实 PDF。",
-    },
-    "ATB-E05002": {
-        "title": "PDF 无文本层",
-        "solution": "扫描件/图片型 PDF 需要 OCR。安装 Tesseract 并加入 PATH 后使用 --ocr，"
-                    "或改用视觉模型处理页面截图。",
     },
     "ATB-E06001": {
         "title": "图片解析失败",
@@ -107,10 +93,6 @@ ERRORS: Dict[str, Dict[str, str]] = {
         "title": "压缩包已加密",
         "solution": "用 --password 提供密码；RAR 需系统已安装 unrar 才能解压。",
     },
-    "ATB-E07003": {
-        "title": "归档条目越界（疑似 Zip Slip）",
-        "solution": "归档内含绝对路径或 ../ 跳转条目，已拒绝解压以保护磁盘安全。",
-    },
     "ATB-E08001": {
         "title": "结构化数据解析失败",
         "solution": "JSON/YAML/TOML/CSV 语法错误。检查文件是否被截断，"
@@ -125,11 +107,6 @@ ERRORS: Dict[str, Dict[str, str]] = {
         "title": "输出写入失败",
         "solution": "检查 --out 目标目录是否存在、是否有写权限、磁盘是否已满。",
     },
-    "ATB-E10001": {
-        "title": "MCP 协议错误",
-        "solution": "请求不是合法 JSON-RPC 2.0。检查 message 是否为单行 JSON，"
-                    "且 Content-Length 分帧（如使用）设置正确。",
-    },
     "ATB-E10002": {
         "title": "MCP 工具参数错误",
         "solution": "调用 tools/call 时 arguments 需为对象，path 必填且为绝对路径。",
@@ -138,11 +115,6 @@ ERRORS: Dict[str, Dict[str, str]] = {
         "title": "缺少可选依赖",
         "solution": "该格式的高级解析需要额外依赖。运行 `{prog} doctor` 查看缺失项，"
                     "或 pip install -r requirements.txt。",
-    },
-    "ATB-E12001": {
-        "title": "额度查询失败",
-        "solution": "检查密钥是否有效、账户是否有余额查询权限、网络是否可达；"
-                    "可用 `{prog} quota --show` 确认配置来源，或用 --provider 单独测试。",
     },
     "ATB-E13001": {
         "title": "UI 精准编辑不可用",
@@ -186,7 +158,6 @@ _CATEGORY_NAMES = {
     "09": "输出写入",
     "10": "MCP 协议",
     "11": "依赖环境",
-    "12": "额度服务",
     "13": "UI 精准编辑",
     "14": "上下文压缩",
 }

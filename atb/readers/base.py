@@ -36,9 +36,11 @@ def decode_bytes(data: bytes, encoding: Optional[str] = None) -> Tuple[str, str,
     warnings: List[str] = []
     if encoding:
         try:
-            return data.decode(encoding, errors="replace"), encoding, warnings
+            return data.decode(encoding), encoding, warnings
         except LookupError:
             warnings.append(f"未知编码 {encoding}，改为自动探测")
+        except UnicodeDecodeError as e:
+            raise AtbError("ATB-E03001", f"指定编码 {encoding} 无法解码：{e}")
 
     for bom, enc in _BOMS:
         if data.startswith(bom):
@@ -175,7 +177,7 @@ def read_file_guard(path: str) -> None:
         raise AtbError("ATB-E01001", path)
     if os.path.isdir(path):
         raise AtbError("ATB-E01004", path)
-    if not os.access(path, os.R_OK):
-        raise AtbError("ATB-E01002", path)
+    # 不用 os.access 预判：Windows 共享冲突时它会误报成普通权限不足，
+    # 交给实际 open 抛出的 PermissionError，由 dispatch 区分 E01002 / E01003。
     if os.path.getsize(path) > config.DEFAULT_MAX_BYTES * 10:
         raise AtbError("ATB-E00004", f"{path} ({human_size(os.path.getsize(path))})")

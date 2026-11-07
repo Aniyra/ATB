@@ -15,7 +15,7 @@ from atb.scanner import scan_directory  # noqa: E402
 class ErrorsTest(unittest.TestCase):
     def test_normalize(self):
         self.assertEqual(normalize_code("1003"), "ATB-E01003")
-        self.assertEqual(normalize_code("E5002"), "ATB-E05002")
+        self.assertEqual(normalize_code("E5001"), "ATB-E05001")
         self.assertEqual(normalize_code("atb-e08001"), "ATB-E08001")
         self.assertIsNone(normalize_code("zzz"))
 

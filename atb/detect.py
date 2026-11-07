@@ -5,7 +5,9 @@
 即使文件被改错扩展名（例如把 .pdf 改成 .txt），也能正确识别。
 """
 
+import ctypes
 import os
+import sys
 import zipfile
 from dataclasses import dataclass
 from typing import Optional
@@ -137,12 +139,24 @@ def _ext_of(path: str) -> str:
     return name.rsplit(".", 1)[1]
 
 
+def is_sharing_violation(exc: BaseException) -> bool:
+    """Windows 共享冲突（WinError 32）会以 PermissionError 形式抛出。"""
+    winerr = getattr(exc, "winerror", None)
+    if winerr is None and sys.platform == "win32":
+        try:
+            winerr = ctypes.windll.kernel32.GetLastError()
+        except Exception:
+            winerr = None
+    return winerr == 32
+
+
 def _read_head(path: str, n: int = 4096) -> bytes:
     try:
         with open(path, "rb") as f:
             return f.read(n)
-    except PermissionError:
-        raise AtbError("ATB-E01002", path)
+    except PermissionError as e:
+        raise AtbError("ATB-E01003" if is_sharing_violation(e) else "ATB-E01002",
+                       f"{path} ({e})")
     except FileNotFoundError:
         raise AtbError("ATB-E01001", path)
     except OSError as e:

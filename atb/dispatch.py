@@ -4,7 +4,7 @@
 import os
 from typing import Optional
 
-from .detect import detect, TEXT_FORMATS
+from .detect import TEXT_FORMATS, detect, is_sharing_violation
 from .errors import AtbError, log_error
 from .models import Document, ReadOptions
 from .readers import READER_BY_FORMAT
@@ -44,7 +44,11 @@ def read_file(path: str, options: Optional[ReadOptions] = None,
                        error=e.to_dict())
         return doc
     except PermissionError as e:
-        err = AtbError("ATB-E01002", f"{path} ({e})")
+        # Windows 共享冲突（WinError 32）与普通权限不足要分开
+        if is_sharing_violation(e):
+            err = AtbError("ATB-E01003", f"{path} ({e})")
+        else:
+            err = AtbError("ATB-E01002", f"{path} ({e})")
     except FileNotFoundError as e:
         err = AtbError("ATB-E01001", f"{path} ({e})")
     except OSError as e:

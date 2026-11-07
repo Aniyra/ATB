@@ -209,6 +209,8 @@ class DataReader(BaseReader):
                         }))
                 except sqlite3.Error as e:
                     doc.warnings.append(f"表 {table} 采样失败：{e}")
+        except sqlite3.Error as e:
+            raise AtbError("ATB-E08002", f"{path} ({e})")
         finally:
             conn.close()
         return doc
