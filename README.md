@@ -11,7 +11,6 @@ PDF / Office / 图片 / 音视频 / 压缩包 / 数据库……一个命令、�
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+">
   <a href="https://github.com/Aniyra/ATB/releases/latest"><img src="https://img.shields.io/github/v/release/Aniyra/ATB" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/MCP-stdio-8A2BE2.svg" alt="MCP stdio">
-  <img src="https://img.shields.io/badge/tests-98%20passed-brightgreen.svg" alt="Tests">
 </p>
 
 <p align="center">
