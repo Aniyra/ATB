@@ -49,7 +49,7 @@ def cleanup(ttl_days: int = DEFAULT_TTL_DAYS, dry_run: bool = False,
                     stat = os.stat(path)
                 except OSError:
                     continue
-                if stat.st_mtime >= cutoff:
+                if ttl > 0 and stat.st_mtime >= cutoff:
                     result["kept_files"] += 1
                     continue
                 if not dry_run:
