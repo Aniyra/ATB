@@ -57,6 +57,33 @@ class SubtitleReader(BaseReader):
         return doc
 
 
+def _message_text(msg) -> str:
+    """从单个邮件对象里取纯文本正文（跳过附件）。
+
+    同时兼容 policy=default 的 EmailMessage 和 mailbox 返回的旧式 Message。
+    """
+    parts = []
+    for part in msg.walk():
+        disposition = (part.get_content_disposition()
+                       if hasattr(part, "get_content_disposition") else None)
+        if disposition == "attachment" or part.get_filename():
+            continue
+        ctype = part.get_content_type()
+        try:
+            if hasattr(part, "get_content"):
+                content = part.get_content()
+            else:
+                payload = part.get_payload(decode=True) or b""
+                content = payload.decode(part.get_content_charset() or "utf-8", "replace")
+        except Exception:
+            continue
+        if ctype == "text/plain":
+            parts.insert(0, content)
+        elif ctype == "text/html":
+            parts.append(_html_to_text(content))
+    return "\n\n".join(p for p in parts if p)
+
+
 class EmailReader(BaseReader):
     name = "email"
     formats = ("email",)
@@ -64,6 +91,8 @@ class EmailReader(BaseReader):
     def read(self, path: str, det, opts: ReadOptions) -> Document:
         if det.ext == "msg" or det.subtype == "msg":
             return self._msg(path, det, opts)
+        if det.ext == "mbox" or det.subtype == "mbox":
+            return self._mbox(path, det, opts)
         doc = new_document(path, det, "email.eml")
         with open(path, "rb") as f:
             msg = email.message_from_binary_file(f, policy=email.policy.default)
@@ -123,6 +152,39 @@ class EmailReader(BaseReader):
             doc.blocks.append(Block("paragraph", clean_text(para)))
         if not found.get("body"):
             doc.warnings.append("未提取到正文，可能是 RTF/HTML 编码的 MSG")
+        return doc
+
+    def _mbox(self, path, det, opts):
+        """mbox：逐个解析存档中的邮件（默认展开前 20 封）。"""
+        import mailbox
+
+        doc = new_document(path, det, "email.mbox")
+        try:
+            total, subjects = 0, []
+            box = mailbox.mbox(path)
+            try:
+                for index, msg in enumerate(box):
+                    total += 1
+                    if index >= 20:
+                        continue
+                    subject = str(msg.get("subject", "")) or f"(无主题 #{index + 1})"
+                    subjects.append(subject)
+                    doc.blocks.append(Block("heading", f"[{index + 1}] {subject}", level=2))
+                    headers = {k: str(msg.get(k, "")) for k in ("from", "to", "cc", "date")}
+                    headers = {k: v for k, v in headers.items() if v}
+                    if headers:
+                        doc.blocks.append(Block("kv", "", meta={"headers": headers}))
+                    for para in split_paragraphs(_message_text(msg)):
+                        doc.blocks.append(Block("paragraph", clean_text(para)))
+            finally:
+                box.close()
+            doc.metadata.update({"messages": total, "subjects": subjects})
+            if total > 20:
+                doc.warnings.append(f"共 {total} 封邮件，仅展开前 20 封")
+            if not total:
+                doc.warnings.append("mbox 中没有解析到邮件")
+        except Exception as e:
+            raise AtbError("ATB-E04001", f"{path} ({type(e).__name__}: {e})")
         return doc
 
 

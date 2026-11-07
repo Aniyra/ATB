@@ -6,7 +6,7 @@
   2. LSP 风格 `Content-Length: N\\r\\n\\r\\n{json}`
 
 提供工具：atb_read_file / atb_read_video / atb_video_storyboard / atb_video_zoom /
-atb_video_guide / atb_query_quota / atb_compress_history / atb_computer_use /
+atb_video_guide / atb_query_quota / atb_compress_history / atb_ui_edit /
 atb_extract_text / atb_file_info / atb_scan_directory / atb_search_text /
 atb_read_batch / atb_list_formats。
 """
@@ -162,42 +162,31 @@ TOOLS: List[dict] = [
         },
     },
     {
-        "name": "atb_computer_use",
+        "name": "atb_ui_edit",
         "description": (
-            "实验性：操作 Windows 桌面应用（复刻 Trae Computer Use 的基础能力）。"
-            "动作：available / list / state / launch / click / scroll / drag / type / key / "
-            "select / set_value / action / ground。"
-            "\n\n使用顺序建议：list 找 app_id → state 看元素树 → ground 定位 → click/type。"
-            "element_id 只在同一窗口当前状态下有效，界面变化后要重新 state。"
-            "\n\n⚠ 实验性且仅支持 Windows，不保证在所有应用上可用；失败时如实告知用户，"
-            "不要反复盲试。执行点击/输入/启动等有副作用的操作前，先向用户确认目标应用与意图；"
-            "每完成一步用一句话说明做了什么。"
-            "\n\n缺少 uiautomation 时元素树退化为子窗口枚举，此时请用截图 + 坐标操作。"
+            "实验性：Windows UI 精准编辑（仅语义化 UI Automation，不做键鼠注入）。"
+            "动作：available / state / ground / set_value / select / action。"
+            "\n\n推荐顺序：state 读取元素树 → ground 或 element_id 精确定位 → "
+            "set_value 设值 / select 选择文本 / action 执行语义动作。"
+            "已移除坐标点击、拖拽、滚动、键入、启动应用等桌面自动化。"
+            "\n\nelement_id 只在同一窗口当前状态下有效，界面变化后要重新 state。"
+            "写入值或执行动作前先向用户确认目标与内容；失败时如实说明，不要盲试。"
+            "\n\n缺少 uiautomation 时只能读取子窗口，写操作会明确报错。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                           "enum": ["available", "list", "state", "launch", "click",
-                                    "scroll", "drag", "type", "key", "select",
-                                    "set_value", "action", "ground"]},
+                           "enum": ["available", "state", "ground", "set_value",
+                                    "select", "action"]},
                 "app": {"type": "string",
-                        "description": "app_id / 进程名 / 标题片段 / hwnd:123 / pid:123"},
-                "x": {"type": "integer", "description": "click 屏幕 X"},
-                "y": {"type": "integer", "description": "click 屏幕 Y"},
-                "x1": {"type": "integer"}, "y1": {"type": "integer"},
-                "x2": {"type": "integer"}, "y2": {"type": "integer"},
+                        "description": "窗口标题片段 / 进程名 / hwnd:123 / pid:123"},
                 "element_id": {"type": "string", "description": "state 返回的元素编号"},
-                "text": {"type": "string", "description": "type 输入的文字 / ground 查找的文字"},
-                "keys": {"type": "string", "description": "按键组合，如 ctrl+s"},
-                "value": {"type": "string", "description": "set_value 的值"},
-                "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
-                "amount": {"type": "integer", "description": "滚动格数，默认 3"},
+                "text": {"type": "string", "description": "ground 要定位的可见文本"},
+                "value": {"type": "string", "description": "set_value 要写入的值"},
+                "exact": {"type": "boolean", "description": "ground 是否精确匹配"},
                 "depth": {"type": "integer", "description": "元素树深度，默认 3"},
                 "max_nodes": {"type": "integer", "description": "元素上限，默认 120"},
-                "screenshot": {"type": "boolean", "description": "state 时附带回传截图路径"},
-                "limit": {"type": "integer", "description": "list 返回窗口数，默认 50"},
-                "wait": {"type": "number", "description": "launch 等待窗口秒数，默认 8"},
             },
             "required": ["action"],
         },
@@ -419,8 +408,9 @@ class McpServer:
                             "\n\n可选：atb_query_quota 查询 AI API 余额（需用户自行配置密钥，未配置时按指引说明即可）。"
                             "\n\n上下文将满或需要交接时，可用 atb_compress_history 把长对话压成"
                             "可续接摘要（确定性抽取，不调用模型）。"
-                            "\n\n实验性：atb_computer_use 可操作 Windows 桌面应用（仅 Windows，"
-                            "不保证兼容）。有副作用的操作先征得用户同意，失败不要反复盲试。"
+                            "\n\n实验性：atb_ui_edit 提供 Windows UI 精准编辑"
+                            "（元素树 / 文本定位 / 设值 / 选择文本 / 语义动作），"
+                            "不做键鼠注入；写入前先征得用户同意，失败不要盲试。"
                             "\n\n【行为约定】禁止闷头干：动手前先说明要做什么；每完成一个小步骤，"
                             "用一句话给出结论；每完成一个大阶段，用一段话总结结果、遗留问题与下一步。"
                             "不确定时先向用户提问，不要臆测缺失信息。"
@@ -493,8 +483,8 @@ class McpServer:
             return _quota_payload(args)
         if name == "atb_compress_history":
             return _history_payload(args)
-        if name == "atb_computer_use":
-            return _computer_payload(args)
+        if name == "atb_ui_edit":
+            return _ui_payload(args)
         if name == "atb_video_guide":
             return VIDEO_GUIDE
         if name == "atb_extract_text":
@@ -774,22 +764,17 @@ def _history_payload(args: dict):
     return (f"```json\n{json.dumps(stats, ensure_ascii=False, indent=2)}\n```\n\n" + markdown)
 
 
-_COMPUTER_KEYS = ("app", "x", "y", "x1", "y1", "x2", "y2", "element_id", "text",
-                  "keys", "value", "direction", "amount", "depth", "max_nodes",
-                  "screenshot", "limit", "wait", "args")
+_UI_KEYS = ("app", "element_id", "text", "value", "exact", "depth", "max_nodes")
 
 
-def _computer_payload(args: dict):
+def _ui_payload(args: dict):
     from .experimental import computer
 
     action = str(args.get("action") or "").strip()
     if not action:
         raise AtbError("ATB-E10002", "缺少 action")
-    params = {k: args.get(k) for k in _COMPUTER_KEYS if args.get(k) is not None}
+    params = {k: args.get(k) for k in _UI_KEYS if args.get(k) is not None}
     result = computer.dispatch(action, params)
-    if action == "list" and isinstance(result.get("apps"), list):
-        result = dict(result)
-        result["apps"] = result["apps"][:int(args.get("limit") or 50)]
     return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 

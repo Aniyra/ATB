@@ -36,7 +36,8 @@ rarfile>=4.1             # RAR（解压需要系统 unrar，列目录不需要�
 
 # ── 可选增强（缺失时自动降级，不影响启动）──────────────────
 pyarrow>=16.0            # Parquet / Arrow IPC（体积较大）
-# uiautomation>=2.0      # 电脑控制（实验性，仅 Windows）的 UI 元素树；未装则退化为子窗口枚举
+brotli>=1.1              # WOFF2 字体名称表解压（缺失时只返回表目录）
+# uiautomation>=2.0      # UI 精准编辑（实验性，仅 Windows）的元素树；未装则只读子窗口
 
 # ── 仅开发/打包需要（运行 ATB 本身不需要）──────────────────
 pyinstaller>=6.0         # build.bat / ATB.spec 单文件打包

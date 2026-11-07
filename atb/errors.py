@@ -145,24 +145,24 @@ ERRORS: Dict[str, Dict[str, str]] = {
                     "可用 `{prog} quota --show` 确认配置来源，或用 --provider 单独测试。",
     },
     "ATB-E13001": {
-        "title": "电脑控制不可用",
+        "title": "UI 精准编辑不可用",
         "solution": "该能力（实验性）仅支持 Windows。其他平台请使用系统自带自动化工具；"
                     "核心文件读取能力不受影响。",
     },
     "ATB-E13002": {
         "title": "未找到目标窗口或应用",
-        "solution": "先用 `{prog} cu list` 查看可用的 app_id / 窗口标题 / 进程名，"
-                    "再把这些值传给 app 参数；启动应用可用 `{prog} cu launch <exe>`。",
+        "solution": "请传窗口标题片段、进程名、hwnd:123 或 pid:123；"
+                    "先用 `{prog} ui state --app <关键词>` 确认能解析到窗口。",
     },
     "ATB-E13003": {
         "title": "UI 元素定位不可用或已失效",
-        "solution": "按 element_id 操作需要可选依赖 uiautomation（pip install uiautomation）；"
-                    "未安装时请改用屏幕坐标 x/y，或重新获取应用状态后再操作。",
+        "solution": "按 element_id 精细操作需要可选依赖 uiautomation"
+                    "（pip install uiautomation）；界面变化后请重新调用 state 获取元素树。",
     },
     "ATB-E13004": {
-        "title": "电脑操作执行失败",
-        "solution": "确认目标窗口未最小化、未被其他窗口遮挡、当前权限足够；"
-                    "必要时用管理员身份运行，或改用截图 + 坐标点击。",
+        "title": "UI 操作执行失败",
+        "solution": "目标元素可能不支持 ValuePattern / TextPattern / Invoke；"
+                    "请重新 state 选择可编辑或可执行控件，不要改用坐标盲点。",
     },
     "ATB-E14001": {
         "title": "历史对话解析失败",
@@ -187,7 +187,7 @@ _CATEGORY_NAMES = {
     "10": "MCP 协议",
     "11": "依赖环境",
     "12": "额度服务",
-    "13": "电脑控制",
+    "13": "UI 精准编辑",
     "14": "上下文压缩",
 }
 

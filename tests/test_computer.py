@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""电脑控制（实验性）测试：只验证不产生副作用的路径。"""
+"""UI 精准编辑（实验性）测试：只验证不产生副作用的路径。"""
 
 import os
 import sys
@@ -13,38 +13,28 @@ from atb.experimental import computer  # noqa: E402
 WINDOWS = sys.platform == "win32"
 
 
-class KeyParseTest(unittest.TestCase):
-    def test_combo(self):
-        self.assertEqual(computer.parse_keys("ctrl+shift+s"), [0x11, 0x10, 0x53])
+class ActionsTest(unittest.TestCase):
+    def test_actions_are_reduced(self):
+        self.assertEqual(computer.ACTIONS,
+                         ("available", "state", "ground", "set_value",
+                          "select", "action"))
 
-    def test_plus_key(self):
-        self.assertEqual(computer.parse_keys("ctrl++"), [0x11, 0xBB])
-
-    def test_function_key(self):
-        self.assertEqual(computer.parse_keys("f12"), [0x7B])
-
-    def test_unknown_key(self):
-        with self.assertRaises(AtbError) as ctx:
-            computer.parse_keys("ctrl+不存在的键")
-        self.assertEqual(ctx.exception.code, "ATB-E00003")
+    def test_desktop_automation_actions_removed(self):
+        for action in ("list", "launch", "click", "scroll", "drag",
+                       "type", "key"):
+            with self.assertRaises(AtbError) as ctx:
+                computer.dispatch(action)
+            self.assertEqual(ctx.exception.code, "ATB-E00003")
 
 
-@unittest.skipUnless(WINDOWS, "电脑控制仅支持 Windows")
+@unittest.skipUnless(WINDOWS, "UI 精准编辑仅支持 Windows")
 class WindowsApiTest(unittest.TestCase):
     def test_available(self):
         info = computer.available()
-        self.assertTrue(info["ok"])
+        self.assertIn("ok", info)
         self.assertEqual(info["platform"], "win32")
         self.assertIn("uiautomation", info)
-        self.assertIn("screenshot", info)
-
-    def test_list_apps_schema(self):
-        apps = computer.list_apps(limit=3)
-        self.assertLessEqual(len(apps), 3)
-        for item in apps:
-            for key in ("app_id", "hwnd", "title", "pid", "process", "bounds"):
-                self.assertIn(key, item)
-            self.assertEqual(len(item["bounds"]), 4)
+        self.assertNotIn("screenshot", info)
 
     def test_missing_app(self):
         with self.assertRaises(AtbError) as ctx:

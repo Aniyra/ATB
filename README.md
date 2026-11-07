@@ -63,7 +63,7 @@ python main.py read "D:\docs\报告.pdf" --md
 ```
 
 > 内置 14 个 MCP 工具：任意文件读取、视频抽帧 / 分镜 / 局部放大、文本搜索、批量读取、目录扫描、
-> 额度查询、历史对话压缩、电脑操作（实验性）。零额外 MCP 依赖，纯 stdio + JSON-RPC 2.0。
+> 额度查询、历史对话压缩、UI 精准编辑（实验性）。零额外 MCP 依赖，纯 stdio + JSON-RPC 2.0。
 
 ---
 
@@ -91,7 +91,7 @@ ATB 的做法：**统一探测 → 统一解析 → 统一 Document schema → �
 | 安全默认 | 压缩包只列目录、不自动解压（防 Zip Slip）；大文件按字节/字符双重截断 |
 | 错误码体系 | `ATB-Eccnnn`，每条都带**成因 + 分步解决方案**，Agent 可据此自主决策 |
 | 三种接入 | CLI 子命令、`import atb` Python API、stdio MCP Server（零额外依赖） |
-| 可选增强 | 额度查询、历史对话压缩；电脑操作（实验性，仅 Windows） |
+| 可选增强 | 额度查询、历史对话压缩；UI 精准编辑（实验性，仅 Windows） |
 
 ---
 
@@ -115,11 +115,11 @@ ATB 的做法：**统一探测 → 统一解析 → 统一 Document schema → �
 | 音视频 | `mp3` `flac` `wav` `m4a` `ogg` `opus` · `mp4` `mkv` `avi` `mov` `webm` | 时长、码率、采样率、标签；有 ffprobe 时输出完整流信息 |
 | 视频理解 | `mp4` `mkv` `avi` `mov` `webm` | **逐帧抽帧 + 时间轴 + MCP 图片回传**，让视觉模型真正看到画面；可导出音轨 |
 | 视频分镜 | `mp4` `mkv` `avi` `mov` `webm` | **一张宫格图看全片**：编号 + 时间码 + 音频包络，按剪辑密度分格，格内取最清晰帧 |
-| 压缩包 | `zip` `7z` `rar` `tar` `gz` `bz2` `xz` `jar` `apk` `whl` `iso` | 条目清单、压缩率、加密检测、`--member` 读取内部文本 |
+| 压缩包 | `zip` `7z` `rar` `tar` `gz` `bz2` `xz` `jar` `apk` `whl` `iso` | 条目清单、压缩率、加密检测、`--member` 读取内部文本；`iso` 解析 ISO9660 目录 |
 | 字幕 | `srt` `vtt` `ass` `ssa` `lrc` | 逐条字幕 + 时间轴 |
-| 邮件 | `eml` `msg` `mbox` | 主题/收发人/正文/附件清单 |
+| 邮件 | `eml` `msg` `mbox` | 主题/收发人/正文/附件清单；mbox 逐封展开（默认前 20 封） |
 | 日历联系人 | `ics` `vcf` | 事件/联系人字段 |
-| 字体 | `ttf` `otf` `woff` `woff2` | name 表：字体族、子族、版本 |
+| 字体 | `ttf` `otf` `woff` `woff2` | name 表：字体族、子族、版本（WOFF2 需 `brotli`） |
 | 可执行 | `exe` `dll` `sys` | PE 头：架构、节区、时间戳 |
 | 未知二进制 | 任意 | 十六进制头、熵值、可打印字符串、格式线索 |
 
@@ -343,40 +343,37 @@ python main.py ctx "D:\logs\chat.md" --out "D:\logs\handoff.md"
 早期对话单行摘要、最近若干轮原文、续接提示；预算超出时会自动继续裁剪。
 MCP 工具：`atb_compress_history`。
 
-### 电脑操作（实验性 · 仅 Windows）
+### UI 精准编辑（实验性 · 仅 Windows）
 
-> ⚠ 实验性：行为可能随版本调整，不保证在所有应用上可用；失败时应视为可选能力缺失。
-> 仅支持 Windows，核心文件读取能力不受影响（非 Windows 导入本模块也不会报错）。
+> ⚠ 实验性：仅支持 Windows，且需要可选依赖 `uiautomation`；核心文件读取不受影响。
 
-复刻 Trae **Computer Use** 的基础能力，用 ctypes 调 Win32 API，**不需要新增依赖**：
+**为什么只保留「精准编辑」**：桌面级的坐标点击、拖拽、滚动、键鼠注入和启动应用难以审计，
+目标窗口位置一变就可能误操作。这里只保留基于 UI Automation 的语义化操作——
+按元素读取、按文本定位、设置值、选择文本、执行语义动作，**不向系统注入任何键鼠事件**。
 
 ```bat
-python main.py cu available                 :: 能力检测
-python main.py cu list                      :: 可见窗口（app_id / 标题 / PID / 区域）
-python main.py cu state --app 记事本 --screenshot
-python main.py cu ground --app 记事本 --text "保存"
-python main.py cu click --app 记事本 --x 100 --y 200
-python main.py cu type --app 记事本 --text "你好"
-python main.py cu key --app 记事本 --keys ctrl+s
-python main.py cu launch --app "C:\Windows\notepad.exe"
+python main.py ui available                                      :: 能力检测
+python main.py ui state --app 记事本                              :: 读取元素树
+python main.py ui ground --app 记事本 --text "保存"                :: 按文本定位
+python main.py ui set_value --app 记事本 --element-id 0.1.2 --value "新内容"
+python main.py ui select --app 记事本 --element-id 0.1.3
+python main.py ui action --app 记事本 --element-id 0.1.4
 ```
 
-| Trae 工具 | ATB 实现 | 说明 |
-|---|---|---|
-| `list_apps` / `launch_app` | `cu list` / `cu launch` | 枚举可见窗口、启动并等待窗口 |
-| `get_app_state` | `cu state` | UI 元素树 + 可选截图 |
-| `click` / `scroll` / `drag` | `cu click` / `click --x/--y` … | 屏幕坐标或 element_id |
-| `type_text` / `press_key` | `cu type` / `cu key` | Unicode 输入、组合键 |
-| `set_value` / `perform_action` / `select_text` | `cu set_value` / `action` / `select` | 优先 UIA，失败降级为点击+输入 |
-| `grounding` | `cu ground` | 按可见文本定位元素 |
-| `resolve_recorded_step` / `verify_recorded_step` | — | 录制回放未实现 |
+| 动作 | 说明 |
+|---|---|
+| `state` | 读取 UI 元素树（element_id / 类型 / 名称 / 区域） |
+| `ground` | 按可见文本定位元素，返回最小匹配区域 |
+| `set_value` | 通过 ValuePattern 精确设置可编辑控件的值 |
+| `select` | 通过 TextPattern 选择控件内文本 |
+| `action` | 执行 Invoke / 默认动作 |
 
-UI 元素树优先用可选依赖 `uiautomation`（`pip install uiautomation`）；未安装时退化为
-Win32 子窗口枚举，此时用 `--screenshot` + 坐标操作。MCP 工具：`atb_computer_use`。
+已移除：`list` `launch` `click` `scroll` `drag` `type` `key` 等桌面自动化。
+MCP 工具：`atb_ui_edit`。
 
 ### 报告目录与 TTL 清理
 
-抽帧、分镜、局部放大、电脑截图会写入 `reports/`。默认保留 **7 天**，每次启动时静默清理过期文件：
+抽帧、分镜、局部放大会写入 `reports/`。默认保留 **7 天**，每次启动时静默清理过期文件：
 
 ```bat
 :: 查看将清理什么（不删除）
@@ -390,8 +387,8 @@ python main.py reports --days 0
 ```
 
 - 保留天数可用环境变量调整：`ATB_REPORT_TTL_DAYS=14`；设为 `0` 关闭自动清理。
-- 只清理 `frames/` `storyboards/` `zoom/` `computer/` 四个目录，不影响 `atb_error_log.json`
-  和其他文件；清理后自动删除变空的目录。
+- 只清理 `frames/` `storyboards/` `zoom/` `computer/` 四个目录（`computer/` 为旧版截图兼容），
+  不影响 `atb_error_log.json` 和其他文件；清理后自动删除变空的目录。
 - 常驻的 `atb mcp` 启动时**不会**自动清理（避免后台服务无人值守时删文件），
   请手动执行 `python main.py reports` 或用系统计划任务定期清理。
 
@@ -403,7 +400,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ATB (All Tool Box)  v1.3.2                                               │
+│ ATB (All Tool Box)  v1.3.3                                               │
 │ 面向 AI Agent 的全格式文件读取工具箱                                      │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -419,7 +416,7 @@ python main.py
   [10] 视频分镜图（一张图看全片）
   [11] 查询 API 额度（可选）
   [12] 压缩历史对话（上下文续接）
-  [13] 电脑操作（实验性 · 仅 Windows）
+  [13] UI 精准编辑（实验性 · 仅 Windows）
   [0] 退出
 ```
 
@@ -439,13 +436,13 @@ print(doc.text())        # 拼接后的纯文本
 print(doc.to_dict())     # 可直接 json.dumps
 
 # 只取文本
-text = atb.extract_text("D:\docs\合同.docx")
+text = atb.extract_text(r"D:\docs\合同.docx")
 
 # 只探测不解析
-info = atb.file_info("D:\downloads\unknown.bin")
+info = atb.file_info(r"D:\downloads\unknown.bin")
 
 # 容错模式：不抛异常，返回 ok=False + error
-doc = atb.read_file("D:\nope.pdf", safe=True)
+doc = atb.read_file(r"D:\nope.pdf", safe=True)
 print(doc.error["code"])  # ATB-E01001
 ```
 
@@ -494,7 +491,7 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 | `atb_video_guide` | 视频预算指南：MB 建议、token 公式、不同上下文窗口的帧数上限 |
 | `atb_query_quota` | 查询 AI API 余额（可选，未配置时返回配置指引） |
 | `atb_compress_history` | 把长对话压成可续接摘要（确定性抽取，不调用模型） |
-| `atb_computer_use` | **实验性**：操作 Windows 桌面应用（复刻 Trae Computer Use 基础能力） |
+| `atb_ui_edit` | **实验性**：Windows UI 精准编辑（元素树/定位/设值/选择/语义动作），不做键鼠注入 |
 | `atb_extract_text` | 只返回纯文本，适合直接进上下文 |
 | `atb_file_info` | 轻量探测：格式/MIME/大小/SHA256 |
 | `atb_scan_directory` | 扫描目录，统计格式分布 |
@@ -512,7 +509,7 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 2. **小步总结**：每完成一个小步骤，用**一句话**给出结论（改了什么、结果如何）。
 3. **大步总结**：每完成一个大阶段，用**一段话**总结结果、遗留问题与下一步。
 4. **能力声明**：不具备图像/音频输入能力时，必须如实说明，不得根据文件名或元数据编造内容。
-5. **实验性边界**：`atb_computer_use` 仅 Windows、不保证兼容；有副作用的操作先征得用户同意，失败不要反复盲试。
+5. **实验性边界**：`atb_ui_edit` 仅 Windows、需要 uiautomation；写入值或执行动作前先征得用户同意，失败不要盲试。
 6. **上下文管理**：上下文将满或需要交接时，用 `atb_compress_history` 生成续接摘要。
 
 ---
@@ -567,7 +564,7 @@ ATB 内置的 MCP Server 使用 **stdio + JSON-RPC 2.0**，不依赖任何 MCP S
 | `E10xxx` | MCP 协议 |
 | `E11xxx` | 依赖缺失 |
 | `E12xxx` | 额度服务：密钥无效、接口不可达 |
-| `E13xxx` | 电脑控制：平台不支持、窗口/元素定位失败 |
+| `E13xxx` | UI 精准编辑：平台不支持、窗口/元素定位失败 |
 | `E14xxx` | 上下文压缩：对话存档无法解析 |
 
 查询：
@@ -657,12 +654,12 @@ ATB/
 │  │  ├─ data.py          JSON / JSONL / YAML / TOML / CSV / SQLite / Parquet / ipynb
 │  │  ├─ media.py         图片 / 音频 / 字体 / PE
 │  │  ├─ video.py         视频抽帧 / 时间轴 / 预算估算（PyAV）
-│  │  ├─ archive.py       ZIP / TAR / 7Z / RAR / GZ / BZ2 / XZ
+│  │  ├─ archive.py       ZIP / TAR / 7Z / RAR / ISO9660 / GZ / BZ2 / XZ
 │  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
 │  └─ experimental/
-│     └─ computer.py      【实验性】电脑控制：窗口/元素树/点击/输入（Win32，仅 Windows）
-├─ tests/                 单元测试（标准库 unittest，98 用例）
-├─ reports/               运行期产物：帧/分镜/放大/截图/错误日志（默认 7 天 TTL）
+│     └─ computer.py      【实验性】UI 精准编辑：元素树/文本定位/设值/选择/语义动作
+├─ tests/                 单元测试（标准库 unittest，102 用例）
+├─ reports/               运行期产物：帧/分镜/放大/错误日志（默认 7 天 TTL）
 ├─ requirements.txt
 ├─ LICENSE                MIT 许可证
 ├─ atb.ico                exe 图标（由 make_icon.py 生成）
@@ -687,9 +684,10 @@ python -m unittest discover -s tests -v
 错误返回 / 未知方法 / Content-Length 分帧）、视频抽帧（现场编码小视频后读取、时间窗、帧差异、关键帧采样、
 MCP image content 回传）、视频分镜（切点检测、多图分格、时间窗、字幕对齐、局部放大、音频包络与导出、
 MCP 宫格图回传）、额度查询（配置读写、环境变量、脱敏、解析器）、历史对话压缩（json/jsonl/纯文本解析、
-去重、预算裁剪、MCP 回传）、电脑控制（按键解析、窗口枚举、错误码；不执行有副作用的操作）、
+去重、预算裁剪、MCP 回传）、UI 精准编辑（动作收窄、窗口解析、错误码；不注入键鼠）、
 MCP 搜索（全文命中、空 query 拒绝、范围提示）、
 reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文件不动、MCP 不自动清理）、
+补充格式（mbox 逐封、HEIC、WOFF/WOFF2 name 表、ISO9660 目录与 `--member`、tar 成员、gzip 预览）、
 进度组件（进度/ETA、spinner、禁用态）。
 
 ---
@@ -699,7 +697,7 @@ reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文�
 - **只读**：ATB 不对源文件做任何写操作（`--out` 除外，且只写你指定的路径）。
 - **不解压**：压缩包默认只列目录；读取内部条目时仅在内存中解压，不落盘，避免 Zip Slip。
 - **默认不联网**：核心能力零网络请求；仅 `atb quota` / `atb_query_quota` 会请求你配置的额度接口。
-- **电脑控制需显式调用**：只有 `atb cu` / `atb_computer_use` 会操作键鼠；读取文件时不会自动触发。
+- **UI 精准编辑不注入键鼠**：只有 `atb ui` / `atb_ui_edit` 会读取元素并可能写入值或执行动作；不产生坐标点击或键盘输入。
 - **报告自动过期**：`reports/` 下的帧/分镜/放大/截图默认 7 天清理，可用 `ATB_REPORT_TTL_DAYS` 调整或设为 0 关闭。
 - **隐私**：文件内容只在本机处理；MCP 模式下内容由客户端决定是否发送给模型。
 
@@ -711,9 +709,9 @@ reports TTL 清理（过期文件、dry-run、空目录回收、白名单外文�
   （Apache-2.0）：HSV 三通道切点检测、按局部剪辑密度分配格位、Laplacian 方差选帧、音频包络同轴绘制。
   本项目为基于 PyAV + Pillow 的独立 Python 实现，**未复制其源码**；差异见「视频分镜」。
 - 局部放大、分镜定位与配置集中化的思路参考 [SAOS-3624/dsh-watch-together](https://github.com/SAOS-3624/dsh-watch-together)；
-  额度查询、历史对话压缩、电脑控制为 ATB 自有实现。
-- 电脑控制能力对标 Trae CN 的 **Computer Use** 内置工具集（list_apps / get_app_state / click / type_text …），
-  本项目用 ctypes + Win32 API 独立复刻基础版本，未使用其源码。
+  额度查询、历史对话压缩、UI 精准编辑为 ATB 自有实现。
+- UI 精准编辑对标 Trae CN Computer Use 的语义化部分（get_app_state / grounding / set_value）；
+  坐标点击、键入等桌面自动化已移除，未使用其源码。
 - PDF / Office / 压缩包 / 视频解码等能力来自 PyMuPDF、python-docx、openpyxl、python-pptx、py7zr、PyAV 等开源项目，详见 [requirements.txt](requirements.txt)。
 
 ---

@@ -10,6 +10,7 @@ import gzip
 import io
 import lzma
 import os
+import struct
 import tarfile
 import zipfile
 
@@ -36,7 +37,9 @@ class ArchiveReader(BaseReader):
             return self._7z(path, det, opts)
         if ext in ("rar", "cbr"):
             return self._rar(path, det, opts)
-        if ext in ("iso", "cab", "arj", "lzh"):
+        if ext == "iso":
+            return self._iso(path, det, opts)
+        if ext in ("cab", "arj", "lzh"):
             from .misc import BinaryReader
             return BinaryReader().read(path, det, opts)
         return self._compressed_stream(path, det, opts)
@@ -96,8 +99,9 @@ class ArchiveReader(BaseReader):
                     if f is None:
                         doc.warnings.append(f"条目不存在：{opts.member}")
                     else:
-                        _append_text_block(doc, f.read(min(opts.max_bytes, 20 * 1024 * 1024)),
-                                           opts, f"tar:{opts.member}")
+                        doc.blocks.extend(_append_text_block(
+                            doc, f.read(min(opts.max_bytes, 20 * 1024 * 1024)),
+                            opts, f"tar:{opts.member}"))
         except tarfile.TarError as e:
             raise AtbError("ATB-E07001", f"{path} ({e})")
         return doc
@@ -124,8 +128,9 @@ class ArchiveReader(BaseReader):
                 if opts.member:
                     data = z.read([opts.member])
                     if data and opts.member in data:
-                        _append_text_block(doc, data[opts.member].read(), opts,
-                                           f"7z:{opts.member}")
+                        doc.blocks.extend(_append_text_block(
+                            doc, data[opts.member].read(), opts,
+                            f"7z:{opts.member}"))
         except AtbError:
             raise
         except Exception as e:
@@ -158,7 +163,106 @@ class ArchiveReader(BaseReader):
                     raise AtbError("ATB-E07002", f"{path} 已加密")
                 if opts.member:
                     rf.setpassword(opts.password or None)
-                    _append_text_block(doc, rf.read(opts.member), opts, f"rar:{opts.member}")
+                    doc.blocks.extend(_append_text_block(
+                        doc, rf.read(opts.member), opts, f"rar:{opts.member}"))
+        except AtbError:
+            raise
+        except Exception as e:
+            raise AtbError("ATB-E07001", f"{path} ({e})")
+        return doc
+
+    # ── ISO9660 ─────────────────────────────────────────────
+    def _iso(self, path, det, opts):
+        """只读解析 ISO9660 目录记录，不解压、不挂载。"""
+        doc = new_document(path, det, "archive.iso")
+        sector = 2048
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                pvd, lba = None, 16
+                while lba * sector + sector <= size and lba < 32:
+                    f.seek(lba * sector)
+                    vd = f.read(sector)
+                    if len(vd) < 7:
+                        break
+                    if vd[0] == 255:
+                        break
+                    if vd[0] == 1 and vd[1:6] == b"CD001":
+                        pvd = vd
+                        break
+                    lba += 1
+                if pvd is None:
+                    raise AtbError("ATB-E07001",
+                                   f"未找到 ISO9660 主卷描述符：{path}")
+
+                label = pvd[40:72].decode("latin-1", "ignore").strip()
+                root = pvd[156:190]
+                root_lba = struct.unpack("<I", root[2:6])[0]
+                root_len = struct.unpack("<I", root[10:14])[0]
+
+                rows, files, total, seen = [], {}, 0, set()
+                stack = [("", root_lba, root_len)]
+                while stack and total < MAX_ENTRIES:
+                    prefix, extent, length = stack.pop()
+                    if extent in seen:
+                        continue
+                    seen.add(extent)
+                    f.seek(extent * sector)
+                    data = f.read(length)
+                    pos = 0
+                    while pos < len(data) and total < MAX_ENTRIES:
+                        rec_len = data[pos]
+                        if rec_len == 0:
+                            pos = (pos // sector + 1) * sector
+                            continue
+                        rec = data[pos:pos + rec_len]
+                        pos += rec_len
+                        if len(rec) < 33:
+                            continue
+                        name_len = rec[32]
+                        raw_name = rec[33:33 + name_len]
+                        if not raw_name:
+                            continue
+                        name = raw_name.decode("latin-1", "replace")
+                        if name in ("\x00", "\x01"):
+                            continue
+                        if name.endswith(";1"):
+                            name = name[:-2]
+                        full = prefix + name
+                        ext_lba = struct.unpack("<I", rec[2:6])[0]
+                        ext_len = struct.unpack("<I", rec[10:14])[0]
+                        is_dir = bool(rec[25] & 0x02)
+                        if is_dir:
+                            rows.append([full + "/", ext_len, "dir"])
+                            stack.append((full + "/", ext_lba, ext_len))
+                        else:
+                            rows.append([full, ext_len, "file"])
+                            files[full] = (ext_lba, ext_len)
+                        total += 1
+
+                doc.metadata.update({
+                    "entries": total,
+                    "filesystem": "ISO9660",
+                    "volume_label": label,
+                    "volume_bytes": size,
+                })
+                doc.blocks.append(Block("table", "", meta={
+                    "header": ["name", "size", "type"], "rows": rows}))
+                if total >= MAX_ENTRIES:
+                    doc.warnings.append(f"共 {total}+ 个条目，仅列出前 {MAX_ENTRIES} 个")
+
+                member = (opts.member or "").lstrip("/")
+                if member:
+                    target = next((k for k in files if k.lower() == member.lower()), None)
+                    if target is None:
+                        doc.warnings.append(f"条目不存在：{opts.member}")
+                    else:
+                        ext_lba, ext_len = files[target]
+                        f.seek(ext_lba * sector)
+                        doc.blocks.extend(_append_text_block(
+                            doc,
+                            f.read(min(ext_len, opts.max_bytes, 20 * 1024 * 1024)),
+                            opts, f"iso:{target}"))
         except AtbError:
             raise
         except Exception as e:
@@ -168,7 +272,8 @@ class ArchiveReader(BaseReader):
     # ── 单文件压缩流（gz/bz2/xz）────────────────────────────
     def _compressed_stream(self, path, det, opts):
         doc = new_document(path, det, "archive.stream")
-        raw = open(path, "rb").read(min(opts.max_bytes + 1024, 64 * 1024 * 1024))
+        with open(path, "rb") as f:
+            raw = f.read(min(opts.max_bytes + 1024, 64 * 1024 * 1024))
         name = os.path.basename(path)
         try:
             if det.ext in ("bz2", "tbz2"):
@@ -206,13 +311,14 @@ class ArchiveReader(BaseReader):
                     if opts.member:
                         f = tf.extractfile(opts.member)
                         if f:
-                            _append_text_block(doc, f.read(min(opts.max_bytes, 20 * 1024 * 1024)),
-                                               opts, f"tar:{opts.member}")
+                            doc.blocks.extend(_append_text_block(
+                                doc, f.read(min(opts.max_bytes, 20 * 1024 * 1024)),
+                                opts, f"tar:{opts.member}"))
                 return doc
             except tarfile.TarError:
                 pass
         doc.blocks.append(Block("kv", f"内部文件：{name}", meta=doc.metadata))
-        _append_text_block(doc, data, opts, name)
+        doc.blocks.extend(_append_text_block(doc, data, opts, name))
         return doc
 
 

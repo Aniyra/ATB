@@ -12,6 +12,21 @@ from ..errors import AtbError
 from ..models import Block, Document, ReadOptions
 from .base import BaseReader, clean_text, new_document
 
+_HEIF_READY = False
+
+
+def _register_heif() -> None:
+    """Pillow 需要显式注册才能打开 HEIC/HEIF。"""
+    global _HEIF_READY
+    if _HEIF_READY:
+        return
+    _HEIF_READY = True
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+
 
 class ImageReader(BaseReader):
     name = "image"
@@ -23,6 +38,7 @@ class ImageReader(BaseReader):
             from PIL import Image, ExifTags
         except ImportError:
             raise AtbError("ATB-E11001", "解析图片需要 Pillow：pip install pillow")
+        _register_heif()
         try:
             with Image.open(path) as im:
                 w, h = im.size
@@ -100,6 +116,8 @@ class FontReader(BaseReader):
             with open(path, "rb") as f:
                 data = f.read(min(os.path.getsize(path), 4 * 1024 * 1024))
             doc.metadata.update(_sfnt_info(data))
+            if doc.metadata.get("note"):
+                doc.warnings.append(doc.metadata.pop("note"))
         except Exception as e:
             doc.warnings.append(f"字体结构解析失败：{e}")
         name = doc.metadata.get("family") or os.path.basename(path)
@@ -183,8 +201,24 @@ def _ffprobe(path: str) -> Optional[dict]:
         return None
 
 
+_WOFF2_TAGS = [
+    b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post",
+    b"cvt ", b"fpgm", b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT",
+    b"EBLC", b"gasp", b"hdmx", b"kern", b"LTSH", b"PCLT", b"VDMX", b"vhea",
+    b"vmtx", b"BASE", b"GDEF", b"GPOS", b"GSUB", b"EBSC", b"JSTF", b"MATH",
+    b"CBDT", b"CBLC", b"COLR", b"CPAL", b"SVG ", b"sbix", b"acnt", b"avar",
+    b"bdat", b"bloc", b"bsln", b"cvar", b"fdsc", b"feat", b"fmtx", b"fvar",
+    b"gvar", b"hsty", b"just", b"lcar", b"mort", b"morx", b"opbd", b"prop",
+    b"trak", b"Zapf", b"Silf", b"Glat", b"Gloc", b"Feat", b"Sill",
+]
+
+
 def _sfnt_info(data: bytes) -> dict:
-    info = {"sfnt_version": data[:4].decode("latin-1", "ignore")}
+    if data[:4] == b"wOFF":
+        return _woff_info(data)
+    if data[:4] == b"wOF2":
+        return _woff2_info(data)
+    info = {"container": "sfnt", "sfnt_version": data[:4].decode("latin-1", "ignore")}
     num_tables = struct.unpack(">H", data[4:6])[0] if len(data) >= 6 else 0
     tables = {}
     for i in range(min(num_tables, 64)):
@@ -203,11 +237,112 @@ def _sfnt_info(data: bytes) -> dict:
     return info
 
 
+def _woff_info(data: bytes) -> dict:
+    """WOFF 1.0：表目录中记录 zlib 压缩后的各表。"""
+    if len(data) < 44:
+        raise ValueError("WOFF 头部不完整")
+    info = {"container": "woff",
+            "sfnt_version": data[4:8].decode("latin-1", "ignore")}
+    num_tables = struct.unpack(">H", data[12:14])[0]
+    tags, name_blob = [], None
+    for i in range(min(num_tables, 64)):
+        off = 44 + i * 20
+        if off + 20 > len(data):
+            break
+        tag = data[off:off + 4]
+        offset, comp_len, orig_len = struct.unpack(">III", data[off + 4:off + 16])
+        tags.append(tag.decode("latin-1", "ignore"))
+        if tag == b"name":
+            raw = data[offset:offset + comp_len]
+            if comp_len < orig_len:
+                import zlib
+                raw = zlib.decompress(raw)
+            name_blob = raw
+    info["tables"] = sorted(tags)
+    if name_blob:
+        info.update({k: v for k, v in _parse_name_table(name_blob).items() if v})
+    return info
+
+
+def _read_base128(data: bytes, pos: int):
+    value = 0
+    for _ in range(5):
+        if pos >= len(data):
+            raise ValueError("base128 截断")
+        byte = data[pos]
+        pos += 1
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            return value, pos
+    raise ValueError("base128 过长")
+
+
+def _woff2_info(data: bytes) -> dict:
+    """WOFF 2.0：表数据是整体 Brotli 压缩流；name 表未变换。"""
+    if len(data) < 48:
+        raise ValueError("WOFF2 头部不完整")
+    info = {"container": "woff2",
+            "sfnt_version": data[4:8].decode("latin-1", "ignore")}
+    num_tables = struct.unpack(">H", data[12:14])[0]
+    total_compressed = struct.unpack(">I", data[20:24])[0]
+    entries, pos = [], 48
+    for _ in range(min(num_tables, 64)):
+        if pos >= len(data):
+            break
+        flags = data[pos]
+        pos += 1
+        index, transform = flags & 0x3F, flags >> 6
+        if index == 63:
+            if pos + 4 > len(data):
+                break
+            tag = data[pos:pos + 4]
+            pos += 4
+        elif index < len(_WOFF2_TAGS):
+            tag = _WOFF2_TAGS[index]
+        else:
+            break
+        try:
+            orig_len, pos = _read_base128(data, pos)
+        except ValueError:
+            break
+        transformed = tag in (b"glyf", b"loca") and transform == 0
+        table_len = orig_len
+        if transformed:
+            try:
+                table_len, pos = _read_base128(data, pos)
+            except ValueError:
+                break
+        entries.append((tag, orig_len, table_len))
+    info["tables"] = sorted({e[0].decode("latin-1", "ignore") for e in entries})
+    if not any(tag == b"name" for tag, _, _ in entries):
+        return info
+    try:
+        import brotli
+    except ImportError:
+        info["note"] = "WOFF2 名称表需要 brotli：pip install brotli"
+        return info
+    blob = data[pos:pos + total_compressed] if total_compressed else data[pos:]
+    try:
+        raw = brotli.decompress(blob)
+    except Exception as e:
+        info["note"] = f"WOFF2 数据解压失败：{e}"
+        return info
+    offset = 0
+    for tag, orig_len, table_len in entries:
+        if tag == b"name":
+            info.update({k: v for k, v in
+                         _parse_name_table(raw[offset:offset + orig_len]).items() if v})
+            break
+        offset += table_len
+    return info
+
+
 def _parse_name_table(blob: bytes) -> dict:
     out = {}
     if len(blob) < 6:
         return out
-    count, str_offset = struct.unpack(">HH", blob[4:8])
+    # 结构：format(2) count(2) stringOffset(2)
+    count, str_offset = struct.unpack(">HH", blob[2:6])
     for i in range(min(count, 64)):
         rec = blob[6 + i * 12: 18 + i * 12]
         if len(rec) < 12:
@@ -215,7 +350,9 @@ def _parse_name_table(blob: bytes) -> dict:
         platform, enc, lang, name_id, length, off = struct.unpack(">HHHHHH", rec)
         raw = blob[str_offset + off: str_offset + off + length]
         try:
-            text = raw.decode("utf-16-be") if platform == 3 else raw.decode("latin-1")
+            # platform 0/3 的字符串是 UTF-16BE；1（Mac）多为单字节
+            text = (raw.decode("utf-16-be", "ignore") if platform in (0, 3)
+                    else raw.decode("latin-1", "ignore"))
         except Exception:
             continue
         key = {1: "family", 2: "subfamily", 4: "full_name", 5: "version", 6: "postscript"}.get(name_id)

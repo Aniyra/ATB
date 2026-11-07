@@ -61,7 +61,7 @@ class McpTest(unittest.TestCase):
         self.assertIn("atb_video_zoom", names)
         self.assertIn("atb_query_quota", names)
         self.assertIn("atb_compress_history", names)
-        self.assertIn("atb_computer_use", names)
+        self.assertIn("atb_ui_edit", names)
 
     def test_tool_call_extract_text(self):
         msgs = self._base() + [
@@ -96,16 +96,17 @@ class McpTest(unittest.TestCase):
         self.assertIn("历史对话压缩包", text)
         self.assertIn("ATB-E01001", text)
 
-    @unittest.skipUnless(sys.platform == "win32", "电脑控制仅支持 Windows")
-    def test_tool_computer_available(self):
+    @unittest.skipUnless(sys.platform == "win32", "UI 精准编辑仅支持 Windows")
+    def test_tool_ui_edit_available(self):
         msgs = self._base() + [
             {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-             "params": {"name": "atb_computer_use",
+             "params": {"name": "atb_ui_edit",
                         "arguments": {"action": "available"}}},
         ]
         res = self._run(msgs)
         payload = json.loads(res[8]["result"]["content"][0]["text"])
-        self.assertTrue(payload["ok"])
+        self.assertIn("ok", payload)
+        self.assertTrue(payload["uiautomation"])
 
     def test_content_length_non_ascii_bytes(self):
         """Content-Length 是字节数：中文消息不能被按字符读。"""

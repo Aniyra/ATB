@@ -13,7 +13,7 @@
     python main.py zoom <视频> --at 秒 [--box x,y,w,h]
     python main.py quota [--set deepseek=KEY] [--init] [--show]
     python main.py ctx <对话存档> [--target-tokens N]
-    python main.py cu <动作> [--app 窗口] [--json]
+    python main.py ui <动作> [--app 窗口] [--json]
     python main.py reports [--days N] [--dry-run]
     python main.py mcp                 # 启动 stdio MCP Server
     python main.py err [编号|关键词]    # 错误码速查
@@ -56,7 +56,7 @@ MENU = {
     "10": ("视频分镜图（一张图看全片）", "storyboard"),
     "11": ("查询 API 额度（可选）", "quota"),
     "12": ("压缩历史对话（上下文续接）", "ctx"),
-    "13": ("电脑操作（实验性 · 仅 Windows）", "cu"),
+    "13": ("UI 精准编辑（实验性 · 仅 Windows）", "ui"),
     "0": ("退出", "exit"),
 }
 
@@ -181,29 +181,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", help="把摘要写入文件")
     sp.add_argument("--json", action="store_true")
 
-    sp = sub.add_parser("cu", help="电脑操作（实验性，仅 Windows）")
+    sp = sub.add_parser("ui", help="UI 精准编辑（实验性，仅 Windows）")
     sp.add_argument("action", nargs="?", default="available",
-                    choices=["available", "list", "state", "launch", "click", "scroll",
-                             "drag", "type", "key", "select", "set_value", "action",
-                             "ground"])
+                    choices=["available", "state", "ground", "set_value",
+                             "select", "action"])
     sp.add_argument("--app", help="app_id / 进程名 / 标题片段 / hwnd:123 / pid:123")
-    sp.add_argument("--x", type=int)
-    sp.add_argument("--y", type=int)
-    sp.add_argument("--x1", type=int)
-    sp.add_argument("--y1", type=int)
-    sp.add_argument("--x2", type=int)
-    sp.add_argument("--y2", type=int)
-    sp.add_argument("--element-id", dest="element_id")
-    sp.add_argument("--text", help="type 要输入的文字 / ground 要查找的文字")
-    sp.add_argument("--keys", help="按键组合，如 ctrl+s")
-    sp.add_argument("--value", help="set_value 的值")
-    sp.add_argument("--direction", default="down", help="up / down / left / right")
-    sp.add_argument("--amount", type=int, default=3, help="滚动格数")
+    sp.add_argument("--element-id", dest="element_id", help="state 返回的元素编号")
+    sp.add_argument("--text", help="ground 要查找的可见文本")
+    sp.add_argument("--value", help="set_value 要写入的值")
+    sp.add_argument("--exact", action="store_true", help="ground 精确匹配文本")
     sp.add_argument("--depth", type=int, default=3, help="元素树深度")
     sp.add_argument("--max-nodes", type=int, default=120, dest="max_nodes")
-    sp.add_argument("--screenshot", action="store_true", help="同时截图")
-    sp.add_argument("--limit", type=int, default=50)
-    sp.add_argument("--wait", type=float, default=8, help="launch 等待窗口秒数")
     sp.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("reports", help="清理 reports 目录中的过期产物（TTL）")
@@ -462,27 +450,20 @@ def cmd_ctx(a) -> int:
     return 0
 
 
-def cmd_cu(a) -> int:
+def cmd_ui(a) -> int:
     from atb.experimental import computer
 
     params = {
-        "app": a.app, "x": a.x, "y": a.y, "x1": a.x1, "y1": a.y1,
-        "x2": a.x2, "y2": a.y2, "element_id": a.element_id, "text": a.text,
-        "keys": a.keys, "value": a.value, "direction": a.direction,
-        "amount": a.amount, "depth": a.depth, "max_nodes": a.max_nodes,
-        "screenshot": a.screenshot or None, "limit": a.limit, "wait": a.wait,
+        "app": a.app, "element_id": a.element_id, "text": a.text,
+        "value": a.value, "exact": a.exact or None,
+        "depth": a.depth, "max_nodes": a.max_nodes,
     }
     result = computer.dispatch(a.action, {k: v for k, v in params.items() if v is not None})
     if a.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
 
-    if a.action == "list":
-        rows = [[w["app_id"], w["title"][:48], w["pid"],
-                 "×".join(str(v) for v in w["bounds"]) if w.get("bounds") else "-",
-                 "是" if w["foreground"] else ""] for w in result["apps"]]
-        print(ui.table(["app_id", "标题", "PID", "位置×尺寸", "前台"], rows))
-    elif a.action == "state":
+    if a.action == "state":
         app = result["app"]
         print(ui.kv_block({
             "应用": app["app_id"],
@@ -498,19 +479,25 @@ def cmd_cu(a) -> int:
         if rows:
             print()
             print(ui.table(["element_id", "类型", "名称", "区域"], rows))
-        if result.get("screenshot"):
-            print()
-            ui.info(f"截图：{result['screenshot']['path']}")
         if result.get("warning"):
             ui.warn(result["warning"])
+    elif a.action == "ground":
+        if result.get("found"):
+            print(ui.kv_block({
+                "元素": result["element_id"],
+                "名称": result.get("name", ""),
+                "类型": result.get("type", ""),
+                "区域": "×".join(str(v) for v in (result.get("bounds") or [])),
+            }))
+        else:
+            ui.warn(result.get("hint") or "未找到匹配元素")
     elif a.action == "available":
         state = "可用" if result["ok"] else "不可用"
         print(ui.kv_block({
-            "电脑控制": state,
+            "UI 精准编辑": state,
             "平台": result["platform"],
-            "UI 自动化": "已安装" if result["uiautomation"] else "未安装（子窗口降级）",
-            "截图": "可用" if result["screenshot"] else "不可用",
-            "说明": result["reason"] or "基础能力就绪",
+            "UI 自动化": "已安装" if result["uiautomation"] else "未安装",
+            "说明": result["reason"] or "语义化编辑能力就绪",
         }))
     else:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -763,17 +750,15 @@ def _menu_action(action: str) -> None:
     if action == "err":
         cmd_err(argparse.Namespace(keyword=None, all=True, json=False))
         return
-    if action == "cu":
-        print(ui.paint("电脑操作（实验性，仅 Windows）：", ui.C.BOLD))
+    if action == "ui":
+        print(ui.paint("UI 精准编辑（实验性，仅 Windows）：", ui.C.BOLD))
         for line in (
-            "atb cu available              查看能力",
-            "atb cu list                   列出可见窗口",
-            "atb cu state --app <关键词>   查看元素树（--screenshot 截图）",
-            "atb cu click --app <关键词> --x 100 --y 200",
-            "atb cu type --app <关键词> --text \"你好\"",
-            "atb cu key --keys ctrl+s",
-            "atb cu ground --app <关键词> --text \"保存\"",
-            "atb cu launch --app \"C:\\Windows\\notepad.exe\"",
+            "atb ui available                              查看能力",
+            "atb ui state --app <标题/进程>                读取元素树",
+            "atb ui ground --app <关键词> --text \"保存\"    按文本定位元素",
+            "atb ui set_value --app <关键词> --element-id 0.1.2 --value \"文本\"",
+            "atb ui select --app <关键词> --element-id 0.1.3",
+            "atb ui action --app <关键词> --element-id 0.1.4",
         ):
             print("  " + line)
         return
@@ -861,9 +846,9 @@ def _doctor() -> list:
         shutil.which("tesseract") or "未安装，不能对扫描件 OCR")
     try:
         import uiautomation as _uia  # noqa: F401
-        add("可选 uiautomation", True, "电脑控制元素树可用")
+        add("可选 uiautomation", True, "UI 精准编辑元素树可用")
     except Exception:
-        add("可选 uiautomation", False, "未安装，电脑控制退化为子窗口枚举（仅 Windows）")
+        add("可选 uiautomation", False, "未安装，UI 精准编辑退化为子窗口枚举（仅 Windows）")
 
     probe = os.path.join(config.REPORT_DIR, ".write_test")
     try:
@@ -932,7 +917,7 @@ def main(argv=None) -> int:
     handlers = {
         "read": cmd_read, "text": cmd_text, "info": cmd_info, "video": cmd_video,
         "storyboard": cmd_storyboard, "zoom": cmd_zoom, "quota": cmd_quota,
-        "ctx": cmd_ctx, "cu": cmd_cu, "reports": cmd_reports,
+        "ctx": cmd_ctx, "ui": cmd_ui, "reports": cmd_reports,
         "scan": cmd_scan, "formats": cmd_formats,
         "doctor": cmd_doctor, "mcp": cmd_mcp, "err": cmd_err,
     }
