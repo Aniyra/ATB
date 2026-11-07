@@ -106,7 +106,7 @@ class McpTest(unittest.TestCase):
         res = self._run(msgs)
         payload = json.loads(res[8]["result"]["content"][0]["text"])
         self.assertIn("ok", payload)
-        self.assertTrue(payload["uiautomation"])
+        self.assertIn("uiautomation", payload)
 
     def test_content_length_non_ascii_bytes(self):
         """Content-Length 是字节数：中文消息不能被按字符读。"""

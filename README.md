@@ -10,6 +10,7 @@ PDF / Office / 图片 / 音视频 / 压缩包 / 数据库……一个命令、�
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+">
   <a href="https://github.com/Aniyra/ATB/releases/latest"><img src="https://img.shields.io/github/v/release/Aniyra/ATB" alt="Latest release"></a>
+  <a href="https://github.com/Aniyra/ATB/actions/workflows/tests.yml"><img src="https://github.com/Aniyra/ATB/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <img src="https://img.shields.io/badge/MCP-stdio-8A2BE2.svg" alt="MCP stdio">
 </p>
 
@@ -657,7 +658,7 @@ ATB/
 │  │  └─ misc.py          字幕 / 邮件 / 日历 / 未知二进制
 │  └─ experimental/
 │     └─ computer.py      【实验性】UI 精准编辑：元素树/文本定位/设值/选择/语义动作
-├─ tests/                 单元测试（标准库 unittest，102 用例）
+├─ tests/                 单元测试（unittest，GitHub Actions 跨平台运行）
 ├─ reports/               运行期产物：帧/分镜/放大/错误日志（默认 7 天 TTL）
 ├─ requirements.txt
 ├─ LICENSE                MIT 许可证
